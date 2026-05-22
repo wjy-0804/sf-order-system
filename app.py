@@ -1,0 +1,1486 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+顺丰快递模版录入系统 - Flask 后端
+"""
+
+import json
+import re
+import os
+import io
+import copy
+import csv
+import tempfile
+import glob
+from datetime import datetime, timedelta
+from flask import Flask, request, jsonify, send_file
+from flask import Response
+import openpyxl
+from openpyxl import load_workbook
+
+app = Flask(__name__, static_folder='.', static_url_path='')
+
+SF_TEMPLATE_PATH = os.environ.get(
+    'SF_TEMPLATE_PATH',
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), '顺丰模版.xlsx')
+)
+STATS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stats')
+os.makedirs(STATS_DIR, exist_ok=True)
+
+# 顺丰模版列头（按顺序）
+SF_COLUMNS = [
+    '用户订单号', '寄件公司', '寄件人', '寄件电话', '寄件详细地址',
+    '收件公司', '收件人', '收件电话', '收件详细地址',
+    '托寄物内容1', '托寄物数量1', '托寄物单价1', '托寄物编码1',
+    '托寄物内容2', '托寄物数量2', '托寄物单价2', '托寄物编码2',
+    '寄方备注', '月结卡号', '运费付款方式', '业务类型', '件数', '包裹重量',
+    '件数1', '包裹重量1', '长（cm）1', '宽（cm）1', '高（cm）1',
+    '件数2', '包裹重量2', '长（cm）2', '宽（cm）2', '高（cm）2',
+    '代收卡号', '代收金额', '保价类型', '保价金额', '包装服务',
+    '签回单-纸质回单', '签回单-拍照回传', '自取件', '拍照回传',
+    '是否超长超重', '超长超重服务费', '是否大件入户', '大件入户服务费',
+    '保鲜服务', '保单配送', '票据专送', '密钥认证', '密钥认证类型',
+    '身份证后6位', '双人派送', '等通知派送', '是否定时派送', '派送日期',
+    '派送时段', '温度追溯', '珍宝服务', '到付现结优惠', '到付现结卡号',
+    '委托类型', '委托人姓名', '委托人电话', '委托人地址', '打包服务',
+    '溯源服务', '安装服务', '安装服务类型', '精温服务', '宅配延伸',
+    '宅配延伸月结卡号', '宅配延伸服务编码', '准时保',
+    '扩展字段1', '扩展字段2', '扩展字段3', '扩展字段4', '扩展字段5',
+    '其他费用', '预约揽件日期', '预约揽件时间', '预约揽件收派员工号',
+    '标准模板完整版标记勿删'
+]
+
+def parse_orders(raw_text):
+    """
+    智能解析订单文本，支持：
+    1. 纯文本格式
+    2. 简单表格（Tab/空格分隔）
+    3. 复杂表格（CSV/Excel复制内容）
+    返回订单列表，每个订单是dict
+    """
+    # 统一换行符：浏览器textarea发送 \r\n，必须标准化为 \n
+    # 否则 _split_order_blocks_v2 的 \n{2,} 无法匹配 \r\n\r\n
+    raw_text = raw_text.replace('\r\n', '\n').replace('\r', '\n')
+
+    orders = []
+    
+    # 尝试检测是否是表格格式（含Tab分隔符）
+    lines = raw_text.strip().split('\n')
+    lines = [l.strip() for l in lines if l.strip()]
+    
+    if not lines:
+        return orders
+    
+    # 检测分隔符
+    tab_count = sum(1 for l in lines[:5] if '\t' in l)
+    comma_count = sum(1 for l in lines[:5] if ',' in l)
+    
+    if tab_count >= 2:
+        orders = parse_table(lines, '\t')
+    elif comma_count >= 2:
+        orders = parse_table(lines, ',')
+    else:
+        orders = parse_freetext(raw_text)
+    
+    return orders
+
+
+def parse_table(lines, sep):
+    """解析表格格式订单"""
+    orders = []
+    if not lines:
+        return orders
+    
+    # 第一行判断是否是表头
+    header_line = lines[0].split(sep)
+    header_map = {}
+    
+    # 核心识别字段（订单号/收件公司/备注等非必要字段不在此列，需用户手动配置规则时再加）
+    # 别名顺序：精确表头名放最前面（优先score=3精确匹配），通用短别名放后面
+    field_aliases = {
+        '收件人': [
+            '收件人姓名',  # 有赞/电商标准
+            '收货人姓名', '收件人', '收货人',  # 通用
+            '联系人', '姓名', '买家姓名', '客户姓名', 'name', 'receiver', '客户',
+        ],
+        '收件电话': [
+            '收货人手机号码', '收件人手机号码', '收货人手机号',  # 电商标准（精确！含"收货人×"前缀）
+            '收货人电话',  # 乡伴/有赞等电商导出标准
+            '手机号码',
+            '联系电话', '收件电话', '收货电话', '手机号',
+            '手机', '电话', 'phone', 'mobile', 'tel', '联系方式',
+        ],
+        '收件详细地址': [
+            '收货人完整地址', '收件人完整地址', '收货人详细地址',  # 电商标准（含"收货人×"/"收件人×"前缀）
+            '收货人地址',  # 乡伴/有赞等电商导出标准
+            '收件详细地址', '收货详细地址',
+            '收货地址', '地址', '详细地址',
+            'address', '收件地址', '送货地址', '送达地址',
+        ],
+        '托寄物内容1': [
+            'SKU规格', 'SKU名称',  # 电商标准（精确！）
+            '商品规格', '商品名称', '规格',  # 带/不带前缀的规格列
+            '托寄物内容1', '货物', '物品', '品名', '商品',
+            'product', 'goods', 'item', '内容', '货品', '寄件内容',
+        ],
+        '托寄物数量1': [
+            'SKU数量',  # 电商标准（精确！）
+            '托寄物数量1', '数量', '件数', 'qty', 'quantity', '重量', '数',
+        ],
+    }
+    
+    # 尝试识别表头（双向匹配：别名∈单元格 或 单元格∈别名）
+    is_header = False
+    for cell in header_line:
+        cell_clean = cell.strip().lower()
+        if not cell_clean:
+            continue
+        for field, aliases in field_aliases.items():
+            if any(a.lower() == cell_clean
+                   or a.lower() in cell_clean  # 别名是单元格的子串（如"收件人" in "收件人姓名"）
+                   or cell_clean in a.lower()   # 单元格是别名的子串
+                   for a in aliases):
+                is_header = True
+                break
+        if is_header:
+            break
+    
+    if is_header:
+        # 构建列索引映射（全局最优匹配 + 别名精确度排序）
+        # Bug14修复：对每个表头cell，遍历所有field找得分最高的
+        # Bug15修复：同分时按命中别名的**长度**排序，越长的别名越精确
+        #   例如 "商品名称"(4字) > "规格"(2字)，"收件人手机号码"(6字) > "手机"(2字)
+        header_map = {}  # col_idx -> field_name
+        _match_score = {}  # field_name -> (col_idx, score, alias_len) 用于去重和精度排序
+        for i, cell in enumerate(header_line):
+            cell_clean = cell.strip()
+            if not cell_clean:
+                continue  # 跳过空单元格，避免 '' in alias 恒True 的bug
+
+            # 遍历所有field，找该cell的最佳匹配（记录命中别名的长度）
+            best_field = None
+            best_score = 0
+            best_alias_len = 0  # 命中别名的字符长度（用于同分时的二级排序）
+            for field, aliases in field_aliases.items():
+                is_exact = any(a.lower() == cell_clean.lower() for a in aliases)
+                is_sub_in_cell = any(a.lower() in cell_clean.lower() for a in aliases)  # 别名是单元格子串
+                is_cell_in_alias = any(cell_clean.lower() in a.lower() for a in aliases)  # 单元格是别名子串
+                if is_exact or is_sub_in_cell or is_cell_in_alias:
+                    score = 3 if is_exact else (2 if is_sub_in_cell else 1)
+                    # 找到当前命中的别名长度
+                    hit_len = 0
+                    if is_exact:
+                        hit_len = max(len(a) for a in aliases if a.lower() == cell_clean.lower())
+                    elif is_sub_in_cell:
+                        hit_len = max(len(a) for a in aliases if a.lower() in cell_clean.lower())
+                    elif is_cell_in_alias:
+                        hit_len = len(cell_clean)
+
+                    # 排序：score > alias_len（分数优先，同分时别名越长越精确）
+                    if score > best_score or (score == best_score and hit_len > best_alias_len):
+                        best_score = score
+                        best_field = field
+                        best_alias_len = hit_len
+
+            if best_field:
+                existing = _match_score.get(best_field)
+                # 替换条件：分数更高，或 同分且别名更长（更精确），或 同分同长度则后列优先
+                should_replace = False
+                if existing is None:
+                    should_replace = True
+                elif best_score > existing[1]:
+                    should_replace = True
+                elif best_score == existing[1] and best_alias_len >= existing[2]:
+                    should_replace = True
+
+                if should_replace:
+                    header_map[i] = best_field
+                    _match_score[best_field] = (i, best_score, best_alias_len)
+                    if existing and existing[0] in header_map and header_map[existing[0]] == best_field:
+                        del header_map[existing[0]]
+
+        # Bug18修复: 商品+规格双列合并 — 某些电商表格将商品名和规格分两列（如 col=商品名称, col+1=规格）
+        # 检测是否有"规格"类型列被托寄物内容1匹配到但未入选（被"商品名称"等更长别名覆盖）
+        _spec_col = None
+        if '托寄物内容1' in _match_score:
+            prod_main_col = _match_score['托寄物内容1'][0]
+            _spec_keywords = ('规格', 'SKU规格', 'spec', '型号', 'size')
+            for i, cell_clean in enumerate(header_line):
+                if i == prod_main_col or not cell_clean or i in header_map:
+                    continue
+                cell_lower = cell_clean.lower()
+                is_spec_type = any(
+                    sk.lower() == cell_lower or sk.lower() in cell_lower or cell_lower in sk.lower()
+                    for sk in _spec_keywords
+                )
+                if is_spec_type:
+                    _spec_col = i
+                    break
+
+        data_lines = lines[1:]
+    else:
+        data_lines = lines
+    
+    for line in data_lines:
+        if not line.strip():
+            continue
+        cells = line.split(sep)
+        order = {}
+        
+        if header_map:
+            for i, cell in enumerate(cells):
+                if i in header_map:
+                    order[header_map[i]] = cell.strip()
+        else:
+            # 无表头时，按位置猜测
+            # 尝试从每个cell中提取信息
+            full_text = ' '.join(cells)
+            order = extract_from_text(full_text)
+        
+        # 补充提取缺失字段
+        if not order.get('收件人') or not order.get('收件电话') or not order.get('收件详细地址'):
+            full_text = sep.join(cells)
+            extracted = extract_from_text(full_text)
+            for k, v in extracted.items():
+                if not order.get(k):
+                    order[k] = v
+        
+        # Bug18修复: 商品名 + 规格自动合并（如"有机甜玉米" + "4.5斤" → "有机甜玉米4.5斤"）
+        if _spec_col is not None and _spec_col < len(cells) and '托寄物内容1' in order:
+            spec_val = str(cells[_spec_col]).strip() if cells[_spec_col] else ''
+            if spec_val and order['托寄物内容1']:
+                order['托寄物内容1'] = order['托寄物内容1'].strip() + spec_val
+
+        # 数据值清洗（去掉常见的前缀/后缀噪音）
+        if '托寄物内容1' in order and order['托寄物内容1']:
+            val = order['托寄物内容1']
+            # 去掉 "规格:" / "规格：" 前缀（电商SKU常见格式）
+            for prefix in ('规格:', '规格：', '【', '['):
+                if val.startswith(prefix):
+                    val = val[len(prefix):]
+            # 去掉末尾分号/句号等
+            val = val.rstrip(';；,，。.')
+            order['托寄物内容1'] = val.strip()
+
+        # Bug18修复: 检测是否缺少规格信息（商品名中无数字/重量单位时提醒用户手动补充）
+        if order.get('托寄物内容1'):
+            import re as _re
+            has_weight_info = bool(_re.search(r'[\d.]+\s*(斤|克|kg|g|斤装|kg装|个|件|箱|包|袋|盒)',
+                                            order['托寄物内容1']))
+            if not has_weight_info:
+                order['_needs_spec_hint'] = True
+
+        if any(order.values()):
+            orders.append(order)
+    
+    return orders
+
+
+def extract_from_text(text):
+    """从自由文本中提取关键字段"""
+    order = {}
+    
+    # 提取手机号
+    phone_pattern = r'1[3-9]\d{9}|0\d{2,3}[-\s]\d{7,8}|\d{11}'
+    phones = re.findall(phone_pattern, text)
+    if phones:
+        order['收件电话'] = phones[0]
+    
+    # 提取省市区地址
+    addr_pattern = r'[^\s，,。；;]+?(?:省|自治区)[^\s，,。；;]*?(?:市|州)[^\s，,。；;]*?(?:区|县|市)[^\s，,。；;]{0,50}'
+    addr_match = re.search(addr_pattern, text)
+    if addr_match:
+        order['收件详细地址'] = addr_match.group()
+    else:
+        # 尝试更宽松的地址匹配
+        addr_pattern2 = r'(?:地址|收货地址|送货地址)[：:]\s*([^\n，,]{5,60})'
+        addr_match2 = re.search(addr_pattern2, text)
+        if addr_match2:
+            order['收件详细地址'] = addr_match2.group(1).strip()
+    
+    # 提取姓名（在手机号附近的短文本，2-4个汉字）
+    name_patterns = [
+        r'(?:收件人|收货人|姓名|联系人)[：:\s]*([^\s，,。0-9]{2,6})',
+        r'([^\s，,。0-9]{2,4})(?:\s+|，|,)?' + (phones[0] if phones else r'\d{11}') if phones else r'',
+    ]
+    for pattern in name_patterns:
+        if not pattern:
+            continue
+        name_match = re.search(pattern, text)
+        if name_match:
+            order['收件人'] = name_match.group(1).strip()
+            break
+    
+    if not order.get('收件人'):
+        # 寻找短汉字序列
+        chinese_names = re.findall(r'[\u4e00-\u9fa5]{2,4}', text)
+        if chinese_names:
+            # 排除常见地名关键词
+            exclude = ['省', '市', '区', '县', '路', '街', '号', '楼', '镇', '乡', '村', '收件', '寄件', '地址', '商品', '货物', '手机', '电话']
+            for name in chinese_names:
+                if not any(ex in name for ex in exclude):
+                    order['收件人'] = name
+                    break
+    
+    # 提取商品名称
+    goods_patterns = [
+        r'(?:商品|货物|物品|品名|托寄物)[：:\s]*([^\n，,。]{2,20})',
+        r'(?:寄|发)[：:\s]*([^\n，,。]{2,20})',
+    ]
+    for pattern in goods_patterns:
+        goods_match = re.search(pattern, text)
+        if goods_match:
+            order['托寄物内容1'] = goods_match.group(1).strip()
+            break
+    
+    # 提取订单号
+    order_patterns = [
+        r'(?:订单号|单号|order)[：:\s#]*([A-Za-z0-9\-]{6,20})',
+        r'NO[.:：]?\s*([A-Za-z0-9\-]{6,20})',
+    ]
+    for pattern in order_patterns:
+        order_match = re.search(pattern, text, re.IGNORECASE)
+        if order_match:
+            order['用户订单号'] = order_match.group(1).strip()
+            break
+    
+    return order
+
+
+def parse_freetext(text):
+    """解析自由文本格式订单 — 多策略级联解析引擎 v3
+
+    支持的格式：
+    A. 结构化键值对：收件人:/手机号码:/详细地址:  (必须含"收件人"或"手机号码")
+    B. "地址："前缀：地址：xxx，姓名电话 \\n 商品
+    C. "姓名 电话 地址"：姓名在前，空格/粘连分隔
+    D. "地址 姓名 电话"：地址在前，同行或跨行
+    E. 兜底模糊提取
+    """
+    orders = []
+    raw_blocks = _split_order_blocks_v2(text)
+
+    for block in raw_blocks:
+        block = block.strip()
+        if not block or len(block) < 5:
+            continue
+
+        # 先检测是否包含重复订单（如两个相同的结构化块粘在一起）
+        sub_orders = _try_split_duplicate_structured(block)
+        if len(sub_orders) > 1:
+            for sub in sub_orders:
+                order = _dispatch_and_parse(sub.strip())
+                if order and any(order.values()):
+                    orders.append(order)
+            continue
+
+        order = _dispatch_and_parse(block)
+        if order and any(order.values()):
+            orders.append(order)
+
+    return orders
+
+
+def _dispatch_and_parse(block):
+    """判断block格式类型，分发给对应解析器"""
+    fmt = _classify_block_format(block)
+
+    if fmt == 'structured':
+        order = _parse_structured(block)
+    elif fmt == 'addr_prefix':
+        order = _parse_addr_prefix(block)
+    elif fmt == 'name_phone_addr':
+        order = _parse_name_phone_addr(block)
+    elif fmt == 'addr_name_phone':
+        order = _parse_addr_name_phone(block)
+    else:
+        order = _parse_fallback(block)
+
+    # 所有路径统一提取商品（如果还没提取到）
+    if order:
+        _extract_product_from_other_lines(block, order)
+
+    return order
+
+
+def _classify_block_format(block):
+    """分类block的格式类型"""
+    lines = [l.strip() for l in block.split('\n') if l.strip()]
+    if not lines:
+        return 'unknown'
+
+    first_line = lines[0]
+
+    # === 优先检测 "姓名在前" 的格式（Type C）===
+    # 因为地址行也可能包含姓名+电话，必须先排除姓名在首的情况
+    # --- 类型C："姓名 电话 地址"（姓名在行首）---
+    # C1: "姓名 电话 地址" 空格分隔
+    if re.match(r'^[\u4e00-\u9fa5]{2,4}\s+1[3-9]\d{9}\s+', first_line):
+        return 'name_phone_addr'
+    # C2: "姓名 电话(粘连) 地址" 或 "姓名 电话(无尾空格)地址"
+    if re.match(r'^[\u4e00-\u9fa5]{2,4}\s*1[3-9]\d{9}', first_line):
+        return 'name_phone_addr'
+    if (re.match(r'^[\u4e00-\u9fa5]{2,4}\s*1[3-9]\d{9}\s*$', first_line)
+        and len(lines) >= 2):
+        return 'name_phone_addr'
+
+    # --- 类型A：结构化键值对 ---
+    # 收件人关键词必须在行首（强信号），其他键可以出现在行中间（支持 / 分隔格式）
+    has_receiver_kw = bool(re.search(r'^(?:收件人|收货人|姓名|联系人)[：:\s]', block, re.MULTILINE))
+    has_phone_kw = bool(re.search(r'(?:手机号码|收件电话|收货电话|手机|电话号码|联系电话|联系方式|手机号)[：:\s]', block))
+    has_addr_detail_kw = bool(re.search(r'(?:详细地址|所在地区|省市区)[：:\s]', block))
+    if has_receiver_kw and (has_phone_kw or has_addr_detail_kw):
+        return 'structured'
+
+    # --- 类型B："地址："前缀 ---
+    if re.match(r'^\s*(?:地址|收件地址|收货地址|送货地址|详细地址)[：:\s]', first_line):
+        return 'addr_prefix'
+
+    # === 最后检测 "地址在前" 的格式（Type D）===
+    # --- 类型D："地址 姓名 电话" ---
+    if (re.search(r'(?:省|自治区|市).{0,20}(?:市|区|县|镇|乡)', first_line)
+        and re.search(r'[\u4e00-\u9fa5]{2,4}\s*1[3-9]\d{9}\s*$', first_line)):
+        return 'addr_name_phone'
+    if (len(lines) >= 2
+        and re.search(r'(?:省|自治区|市).{0,15}(?:市|区|县|镇)', lines[0])
+        and (re.search(r'1[3-9]\d{9}', lines[1]) or re.match(r'^[\u4e00-\u9fa5]{2,4}', lines[1]))):
+        return 'addr_name_phone'
+    if (re.search(r'(?:省|自治区|市).{10,}(?:市|区|县|镇)', first_line)
+        and re.search(r'[\u4e00-\u9fa5]{2,4}1[3-9]\d{9}\s*$', first_line)):
+        return 'addr_name_phone'
+
+    return 'unknown'
+
+
+def _split_order_blocks_v2(text):
+    """将文本智能拆分为多个订单block"""
+    blocks = re.split(r'\n{2,}', text)
+    if len(blocks) <= 3:
+        sub_blocks = []
+        for b in blocks:
+            # 用前瞻确保"数字."后面跟的是空格或中文（避免把"4.5斤"中的4.当成列表编号）
+            parts = re.split(r'(?m)^(?:\d+)[.、。](?=\s|[\u4e00-\u9fa5])', b)
+            for p in parts:
+                p = p.strip()
+                if p:
+                    sub_blocks.append(p)
+        if len(sub_blocks) > len(blocks):
+            blocks = sub_blocks
+    return blocks
+
+
+def _try_split_duplicate_structured(block):
+    """检测一个block内是否包含多个重复的结构化订单（如两个刘琴）"""
+    receivers = list(re.finditer(r'^(?:收件人|收货人|姓名)[：:\s]', block, re.MULTILINE))
+    if len(receivers) >= 2:
+        positions = [m.start() for m in receivers]
+        result = []
+        for i, pos in enumerate(positions):
+            end = positions[i + 1] if i + 1 < len(positions) else len(block)
+            chunk = block[pos:end].strip()
+            if chunk:
+                result.append(chunk)
+        if len(result) > 1:
+            return result
+    return [block]
+
+
+# ========================================================================
+# 格式A: 结构化键值对
+# ========================================================================
+
+def _split_kv_line(line):
+    """将一行可能包含多对"key:value / key2:value2"的文本拆分为多个(key, value)元组
+
+    支持 / 和空格 分隔的多键值对
+    """
+    line = line.strip()
+    if not line:
+        return []
+
+    # 检测是否包含 / 分隔符且看起来像多键值对（value部分还有 key:value 模式）
+    if '/' in line:
+        # 按 / 分割，然后对每段提取 key: value
+        parts = [p.strip() for p in line.split('/')]
+        results = []
+        for part in parts:
+            m = re.match(r'^([^：:\s]{2,10})[：:\s]+(.{1,100})$', part.strip())
+            if m:
+                results.append((m.group(1).strip(), m.group(2).strip()))
+        if len(results) >= 2:
+            return results
+
+    # 单键值对的常规处理
+    m = re.match(r'^([^：:\s]{2,10})[：:\s]+(.{1,100})$', line)
+    if m:
+        return [(m.group(1).strip(), m.group(2).strip())]
+
+    return []
+
+
+def _parse_structured(block):
+    """解析结构化键值对格式"""
+    lines = block.split('\n')
+    order = {}
+    region_val = ''
+
+    structured_keys = {
+        '收件人': ['收件人', '收货人', '姓名', '联系人', '客户姓名'],
+        '收件电话': ['收件电话', '收货电话', '手机号码', '手机', '电话号码',
+                     '联系电话', '联系方式', '手机号'],
+        '收件详细地址': ['详细地址', '收件地址', '收货地址', '送货地址'],
+        '所在地区': ['所在地区', '地区', '省市区', '所属区域'],
+        '收件公司': ['收件公司', '收货公司', '公司名称', '公司', '单位'],
+        '托寄物内容1': ['商品名称', '商品', '货物', '物品', '品名', '内容',
+                        '寄件物', '托寄物', '产品'],
+        '用户订单号': ['订单号', '单号', '订单编号', '编号'],
+        '寄方备注': ['备注', '备注信息', '说明', '特殊说明'],
+    }
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        kv_pairs = _split_kv_line(line)
+        for key_raw, val in kv_pairs:
+            matched_field = None
+            for field, aliases in structured_keys.items():
+                if key_raw in aliases or key_raw == field:
+                    matched_field = field
+                    break
+            if not matched_field:
+                continue
+
+            if matched_field == '所在地区':
+                region_val = val
+            elif matched_field == '收件详细地址':
+                if region_val and not val.startswith(region_val):
+                    order[matched_field] = region_val + val
+                else:
+                    order[matched_field] = val
+            else:
+                order[matched_field] = val
+
+    return order
+
+
+# ========================================================================
+# 格式B: "地址："前缀
+# ========================================================================
+
+def _parse_addr_prefix(block):
+    """处理"地址：xxx，姓名电话"格式"""
+    addr_line_match = re.search(
+        r'(?:地址|收件地址|收货地址|送货地址|详细地址)[：:\s]+(.+?)(?:\n|$)',
+        block
+    )
+    if not addr_line_match:
+        return {}
+
+    order = {}
+    addr_content = addr_line_match.group(1).strip()
+    phone_in_addr = re.search(r'(1[3-9]\d{9})\s*$', addr_content)
+
+    if phone_in_addr:
+        order['收件电话'] = phone_in_addr.group(1)
+        remaining = addr_content[:phone_in_addr.start()].rstrip(' ，,；;、')
+        name_match = re.search(r'([\u4e00-\u9fa5]{2,4})\s*$', remaining)
+        exclude_kw = _get_address_exclude_kw()
+        if name_match:
+            candidate_name = name_match.group(1)
+            if not any(kw in candidate_name for kw in exclude_kw):
+                order['收件人'] = candidate_name
+                addr_text = remaining[:name_match.start()].rstrip(' ，,；;、')
+            else:
+                addr_text = remaining
+        else:
+            addr_text = remaining
+        order['收件详细地址'] = _strip_trailing_product(addr_text).strip()
+    else:
+        order['收件详细地址'] = _strip_trailing_product(addr_content)
+        phones = re.findall(r'1[3-9]\d{9}', addr_content)
+        if phones:
+            order['收件电话'] = phones[0]
+        _extract_name_smart(order, block)
+
+    return order
+
+
+# ========================================================================
+# 格式C: "姓名 电话 地址"
+# ========================================================================
+
+def _parse_name_phone_addr(block):
+    """处理"姓名 电话 地址"格式"""
+    lines = [l.strip() for l in block.split('\n') if l.strip()]
+    if not lines:
+        return {}
+
+    order = {}
+    first_line = lines[0]
+
+    # C1: "姓名 电话 地址" 空格分隔 同行
+    m = re.match(r'^([\u4e00-\u9fa5]{2,4})\s+(1[3-9]\d{9})\s+(.{5,120})$', first_line)
+    if m:
+        order['收件人'] = m.group(1)
+        order['收件电话'] = m.group(2)
+        order['收件详细地址'] = _strip_trailing_product(m.group(3).strip())
+        return order
+
+    # C2: "姓名 电话(粘连/半空格) 地址" — 允许姓名与电话间有0-N个空格
+    m = re.match(r'^([\u4e00-\u9fa5]{2,4})\s*(1[3-9]\d{9})(.{5,120})$', first_line)
+    if m:
+        order['收件人'] = m.group(1)
+        order['收件电话'] = m.group(2)
+        order['收件详细地址'] = _strip_trailing_product(m.group(3).strip())
+        return order
+
+    # C3: 跨行 - 第一行"姓名 电话"，后续行为地址
+    m = re.match(r'^([\u4e00-\u9fa5]{2,4})\s*(1[3-9]\d{9})\s*$', first_line)
+    if m and len(lines) >= 2:
+        order['收件人'] = m.group(1)
+        order['收件电话'] = m.group(2)
+        addr_parts = []
+        for l in lines[1:]:
+            l = l.strip()
+            if not l:
+                continue
+            # 如果这行同时像地址又像商品（地址末尾带商品描述）
+            if _looks_like_product(l) and re.search(r'(?:省|自治区|市).{0,20}(?:市|区|县|镇)', l):
+                # 剥离商品后作为地址，精确提取被剥离的商品名
+                stripped = _strip_trailing_product(l)
+                addr_parts.append(stripped)
+                # 提取被剥离的商品部分：原文本去除地址后剩余的内容
+                product_part = l[len(stripped):].strip() if len(stripped) < len(l) else ''
+                if product_part:
+                    order.setdefault('托寄物内容1', product_part)
+                else:
+                    # 兜底：用宽松匹配提取末尾可能的商品描述
+                    pm = re.search(r'\s{2,}([\u4e00-\u9fa5a-zA-Z0-9()（）\-·【】\[\]]{2,50})\s*$', l)
+                    if pm:
+                        order.setdefault('托寄物内容1', pm.group(1))
+                break
+            if _looks_like_product(l):
+                order.setdefault('托寄物内容1', l)
+                break
+            addr_parts.append(l)
+        if addr_parts:
+            # 对最后一部分也做一次商品剥离，同时尝试提取商品
+            joined = ' '.join(addr_parts)
+            last_addr = _strip_trailing_product(joined)
+            order['收件详细地址'] = last_addr
+            # 如果还没拿到商品，且剥离后有变化，再试一次
+            if not order.get('托寄物内容1') and len(last_addr) < len(joined):
+                pp = joined[len(last_addr):].strip()
+                if pp:
+                    order['托寄物内容1'] = pp
+        return order
+
+    return {}
+
+
+# ========================================================================
+# 格式D: "地址 姓名 电话"
+# ========================================================================
+
+def _extract_name_from_end(text, exclude_kw=None):
+    """从文本末尾提取姓名，优先匹配称谓模式（X小姐/先生/女士）
+
+    策略：
+    1. 先在文本末尾查找称谓词（小姐/先生/女士等），找到后往前取1-2字作为姓
+    2. 若无称谓，则用通用姓名模式（优先长匹配）
+
+    Returns: (name, start_pos) 或 (None, -1)
+    """
+    if exclude_kw is None:
+        exclude_kw = _get_address_exclude_kw()
+
+    # 策略1: 称谓模式 — 先定位称谓词，再往前提取姓名（避免正则重叠问题）
+    titles = ['小姐', '先生', '女士', '男士', '总经理', '经理', '老板',
+              '帅哥', '美女', '阿姨', '叔叔', '婶婶', '大爷', '奶奶']
+    for title in titles:
+        if text.endswith(title):
+            before_title = text[:-len(title)].rstrip()
+            if before_title:
+                # 中文姓氏绝大多数是单字（复姓如"欧阳"罕见），取末尾1字作为姓
+                # 这样避免吃到地址词（如"...路石小姐"中的"路"）
+                surname = before_title[-1]
+                full_name = surname + title
+                name_pos = len(before_title) - 1
+                return full_name, name_pos
+            break
+
+    # 策略2: 通用姓名 — 长匹配优先（3>2>4），避免短字符串误匹配
+    for length in [3, 2, 4]:
+        m = re.search(rf'([\u4e00-\u9fa5]{{{length}}})\s*$', text)
+        if m:
+            cand = m.group(1)
+            if not any(kw in cand for kw in exclude_kw):
+                return cand, m.start()
+
+    return None, -1
+
+
+def _parse_addr_name_phone(block):
+    """处理"地址 姓名 电话"格式"""
+    lines = [l.strip() for l in block.split('\n') if l.strip()]
+    if not lines:
+        return {}
+
+    order = {}
+    first_line = lines[0]
+    exclude_kw = _get_address_exclude_kw()
+
+    # D1: 同行 — 从末尾找电话→逆向找姓名→剩余=地址
+    phone_match = re.search(r'(1[3-9]\d{9})\s*$', first_line)
+    if phone_match:
+        before_phone = first_line[:phone_match.start()].rstrip()
+        name, name_pos = _extract_name_from_end(before_phone, exclude_kw)
+        if name:
+            order['收件人'] = name
+            order['收件电话'] = phone_match.group(1)
+            addr_part = before_phone[:name_pos].strip()
+            order['收件详细地址'] = _strip_trailing_product(addr_part)
+            return order
+
+    # D2: 跨行 "地址\n 姓名电话" 或 "地址\n 姓名(备注)\n 电话"
+    if len(lines) >= 2:
+        first_has_addr = bool(re.search(r'.{5,}(?:省|自治区|市).{0,15}(?:市|区|县|镇|乡|街|路)', lines[0]))
+
+        # D2a: 标准两行 — 第二行有电话
+        second_has_phone = bool(re.search(r'1[3-9]\d{9}', lines[1]))
+        if first_has_addr and second_has_phone:
+            name_m = re.match(r'^([\u4e00-\u9fa5]{2,4})', lines[1])
+            phone_m = re.search(r'(1[3-9]\d{9})', lines[1])
+            if name_m:
+                order['收件人'] = name_m.group(1)
+            if phone_m:
+                order['收件电话'] = phone_m.group(1)
+            addr_text = _clean_addr_line(lines[0], order.get('收件人'), order.get('收件电话'))
+            order['收件详细地址'] = _strip_trailing_product(addr_text)
+            return order
+
+        # D2b: 三行 — 地址 + 姓名备注行(无电话) + 电话独占一行
+        if first_has_addr and len(lines) >= 3:
+            # 在后续行中找电话（跳过可能的姓名/备注行）
+            phone_line_idx = None
+            for idx in range(1, len(lines)):
+                if re.search(r'^1[3-9]\d{9}$', lines[idx].strip()):
+                    phone_line_idx = idx
+                    break
+            if phone_line_idx:
+                # 从电话行之前的行提取姓名（可能是 "小陳:/有机素食工作室" 格式）
+                name_from_prev = None
+                for prev_idx in range(1, phone_line_idx):
+                    prev_line = lines[prev_idx].strip()
+                    # 支持 "名字:/备注" 或纯 "名字" 格式
+                    name_m = re.match(r'^([\u4e00-\u9fa5]{2,4})(?::/|$|\s)', prev_line)
+                    if name_m:
+                        name_from_prev = name_m.group(1)
+                        break
+                    # 也尝试直接取前2-3个字作为姓名（如果这行很短且不含地址词）
+                    if len(prev_line) <= 10 and re.match(r'^[\u4e00-\u9fa5/:：]+$', prev_line):
+                        name_m2 = re.match(r'^([\u4e00-\u9fa5]{2,4})', prev_line)
+                        if name_m2:
+                            name_from_prev = name_m2.group(1)
+                            break
+
+                phone_m = re.search(r'(1[3-9]\d{9})', lines[phone_line_idx])
+                if phone_m:
+                    order['收件电话'] = phone_m.group(1)
+                if name_from_prev:
+                    order['收件人'] = name_from_prev
+                addr_text = _clean_addr_line(lines[0], order.get('收件人'), order.get('收件电话'))
+                order['收件详细地址'] = _strip_trailing_product(addr_text)
+                return order
+
+    # D3: 粘连 "长地址...姓名电话(无分隔)"
+    stuck = re.search(r'(.{10,})([\u4e00-\u9fa5]{2,4})(1[3-9]\d{9})\s*$', first_line)
+    if stuck:
+        addr_part = stuck.group(1).strip()
+        cand_name_raw = stuck.group(2)
+        # 用称谓感知逻辑重新从addr_part+name中提取
+        full_before_phone = addr_part + cand_name_raw
+        name, name_pos = _extract_name_from_end(full_before_phone, exclude_kw)
+        if name and name_pos > len(addr_part) - 2:
+            # 姓名确实在地址之后
+            order['收件人'] = name
+            order['收件电话'] = stuck.group(3)
+            order['收件详细地址'] = _strip_trailing_product(full_before_phone[:name_pos].strip())
+            return order
+        # 兜底：原始逻辑但用排除词检查
+        if not any(kw in cand_name_raw for kw in exclude_kw):
+            order['收件人'] = cand_name_raw
+            order['收件电话'] = stuck.group(3)
+            order['收件详细地址'] = _strip_trailing_product(addr_part)
+            return order
+
+    return {}
+
+
+# ========================================================================
+# 格式E: 兜底
+# ========================================================================
+
+def _parse_fallback(block):
+    """兜底策略"""
+    order = {}
+    kw_patterns = {
+        '收件人': r'(?:收件人|收货人|姓名|联系人)[：:\s]*([^\n，,。\d]{2,8})',
+        '收件电话': r'(?:收件电话|收货电话|手机|电话|联系电话|联系方式|手机号码)[：:\s]*(1[3-9]\d{9}|0\d{2,3}[-\s]?\d{7,8})',
+        '收件详细地址': r'(?:收件地址|收货地址|地址|详细地址|送货地址)[：:\s]*([^\n]{5,80})',
+        '用户订单号': r'(?:订单号|单号|订单编号)[：:\s]*([A-Za-z0-9\-]{4,25})',
+        '寄方备注': r'(?:备注|备注信息|特殊说明)[：:\s]*([^\n]{1,50})',
+    }
+    for field, pattern in kw_patterns.items():
+        m = re.search(pattern, block)
+        if m:
+            val = m.group(1).strip()
+            if field == '收件详细地址' and val:
+                val = _clean_address_field(val, order)
+            order[field] = val
+    if not order.get('收件电话'):
+        phones = re.findall(r'1[3-9]\d{9}', block)
+        if phones:
+            order['收件电话'] = phones[0]
+    if not order.get('收件详细地址'):
+        addr_match = re.search(
+            r'[^\s，,。；;\d]{2,5}?(?:省|自治区|市)[^\s，,。；;\d]{1,10}?(?:市|州|区|县)[^\n，,。；;]{5,60}',
+            block
+        )
+        if addr_match:
+            order['收件详细地址'] = _strip_trailing_product(addr_match.group())
+    if not order.get('收件人'):
+        _extract_name_smart(order, block)
+    return order
+
+
+# ========================================================================
+# 公共工具函数
+# ========================================================================
+
+def _get_address_exclude_kw():
+    """获取地址清洗排除关键词（用于判断一个词是不是地名而非姓名）"""
+    return [
+        '省','市','区','县','路','街','号','楼','镇','乡','村',
+        '单元','室','层','栋','大厦','广场','花园','公寓','小区',
+        '收件','寄件','地址','公司','单位','街道'
+    ]
+
+
+def _strip_trailing_product(addr_text):
+    """从地址末尾剥离可能粘连的商品描述
+
+    例如: "...建设三马路32号604    新鲜有机甜玉米（10斤装）"
+         → "...建设三马路32号604"
+    """
+    if not addr_text:
+        return addr_text
+
+    # 匹配末尾的商品描述模式：空白 + （中文/字母/数字/括号组成的商品名）
+    patterns = [
+        # "    新鲜有机甜玉米（10斤装）"
+        r'\s{2,}([\u4e00-\u9fa5a-zA-Z0-9()（）\-【】\[\]·]{2,30}(?:\(\d+[斤kgKG公斤克g箱袋盒件装]+\)|【.*?】|\(\d+\))?)\s*$',
+        # " 蔬菜包8种加玉米"
+        r'\s+([\u4e00-\u9fa5a-zA-Z]{2,20}(?:\d*[斤kgKG公斤克g箱袋盒件]|加\w+)\s*)$',
+        # "(10斤装)" 结尾的
+        r'\s*\(?\d*\.?\d*\s*(?:斤|kg|KG|公斤|克|g|件|箱|袋|盒)(?:装)?\)?\s*$',
+        # 任何以常见农产品词结尾且长度>4的尾巴
+        r'\s{2,}([\u4e00-\u9fa5]{2,})\s*(?:\d+[斤kgKG公斤克g])?\s*$',
+    ]
+
+    cleaned = addr_text
+    for pat in patterns:
+        m = re.search(pat, cleaned)
+        if m:
+            # 确保不会过度截取（保留至少10个字符的地址）
+            remaining_len = cleaned[:m.start()].strip().__len__()
+            if remaining_len >= 10:
+                cleaned = cleaned[:m.start()].strip()
+            break
+
+    return cleaned
+
+
+def _clean_addr_line(addr_line, known_name=None, known_phone=None):
+    """清理地址行：去掉已知的姓名和电话"""
+    cleaned = addr_line
+    if known_phone and known_phone in cleaned:
+        cleaned = cleaned.replace(known_phone, '').strip()
+    if known_name and known_name in cleaned:
+        cleaned = cleaned.replace(known_name, '').strip()
+    # 去掉多余空格
+    cleaned = re.sub(r'\s{2,}', ' ', cleaned)
+    return cleaned
+
+
+def _looks_like_product(text):
+    """判断一行文字是否看起来像是商品描述"""
+    text = text.strip()
+    if not text or len(text) < 1:
+        return False
+
+    # 排除非商品的词
+    not_goods = [
+        '地址', '电话', '手机', '联系人', '收件', '寄件',
+        '备注', '订单', '单号', '编号', '公司', '单位',
+        '省', '市', '区', '县', '路', '街', '号', '楼',
+        '寄件人', '收货人'
+    ]
+    if any(ng in text for ng in not_goods):
+        return False
+
+    # 商品模式（任一匹配即判定为商品）
+    prod_patterns = [
+        # 以数字+单位开头的: "4.5斤玉米"、"10斤装"
+        r'^\d+(?:\.\d+)?\s*(?:斤|kg|KG|公斤|克|g|件|箱|袋|盒)',
+        # 纯中文商品名（2字以上）: "玉米"、"红菜头"、"蔬菜包"
+        r'^[\u4e00-\u9fa5]{2,20}$',
+        # 带规格的商品名: "玉米4.5斤"、"有机蔬菜 5斤"
+        r'^[\u4e00-\u9fa5a-zA-Z0-9]{1,30}(?:\d+(?:\.\d+)?)?\s*(?:斤|kg|KG|公斤|克|g|件|箱|袋|盒|装)$',
+        # 带括号规格: "新鲜有机甜玉米（10斤装）"
+        r'^[\u4e00-\u9fa5a-zA-Z0-9()（）\-·【】\[\]]{2,50}[\(（]',
+        # 包/套餐/组合类: "蔬菜包8种加玉米"
+        r'[\u4e00-\u9fa5]{2,}(?:包|套餐|组合|篮|礼盒|系列)',
+    ]
+
+    for pat in prod_patterns:
+        if re.match(pat, text):
+            return True
+
+    return False
+
+
+def _clean_address_field(addr_val, order):
+    """清理地址字段：去掉末尾粘连的姓名+电话"""
+    cleaned = addr_val
+    # 如果地址末尾有11位手机号，截掉它及前面的姓名
+    phone_at_end = re.search(r'(1[3-9]\d{9})\s*$', cleaned)
+    if phone_at_end:
+        before_phone = cleaned[:phone_at_end.start()].rstrip(' ，,；;、')
+        name_before_phone = re.search(r'([\u4e00-\u9fa5]{2,4})\s*$', before_phone)
+        exclude_kw = ['省','市','区','县','路','街','号','楼','镇','乡','村',
+                      '单元','室','层','栋','大厦','广场']
+        if name_before_phone:
+            cand = name_before_phone.group(1)
+            if not any(kw in cand for kw in exclude_kw):
+                order.setdefault('收件人', cand)
+                cleaned = before_phone[:name_before_phone.start()].rstrip(' ，,；;、')
+        else:
+            cleaned = before_phone
+        order.setdefault('收件电话', phone_at_end.group(1))
+    return cleaned.strip()
+
+
+def _extract_name_smart(order, block):
+    """从block中提取收件人姓名（智能版，避免误识别备注/别名）"""
+    phone = order.get('收件电话', '')
+
+    exclude_kw = [
+        '省','市','区','县','路','街','号','楼','镇','乡','村',
+        '单元','室','层','栋','大厦','广场','花园',
+        '收件','寄件','地址','商品','货物','手机','电话','公司',
+        '单位','订单','备注','数量','工作室','有机','素食','农场',
+        '种植','基地','合作社'
+    ]
+
+    if phone:
+        before = block[:block.find(phone)] if phone in block else block
+        names = re.findall(r'[\u4e00-\u9fa5]{2,4}', before[-30:])
+        for name in reversed(names):
+            if not any(kw in name for kw in exclude_kw):
+                order['收件人'] = name
+                return
+    else:
+        lines = block.strip().split('\n')
+        for line in lines:
+            line = line.strip()
+            if re.search(r'(?:省|自治区|市).*?(?:区|县|市)', line):
+                continue
+            if re.match(r'^[^：:\s]{2,10}[：:\s]', line):
+                continue
+            if _looks_like_product(line):
+                continue
+            m = re.match(r'^([\u4e00-\u9fa5]{2,4})', line)
+            if m:
+                cand = m.group(1)
+                if not any(kw in cand for kw in exclude_kw):
+                    order['收件人'] = cand
+                    return
+
+
+# 保留旧名作为兼容别名
+def _extract_name_from_block(order, block):
+    """兼容性别名"""
+    return _extract_name_smart(order, block)
+
+
+def _extract_product_from_other_lines(block, order):
+    """从block的非地址行提取商品信息
+
+    支持格式：
+    - 玉米4.5斤
+    - 新鲜有机甜玉米（10斤装）
+    - 蔬菜包8种加玉米
+    - 4.5斤玉米
+    - 玉米
+    """
+    if order.get('托寄物内容1'):
+        return
+
+    lines = block.split('\n')
+    # 跳过包含地址/电话信息的行（那些已经被解析为地址了）
+    skip_patterns = [
+        r'^(?:地址|收件地址|收货地址|送货地址|详细地址)',
+        r'(?:省|自治区|市).*?(?:区|县|市)',
+        r'1[3-9]\d{9}',
+        r'^(?:收件人|收货人|姓名|联系人|手机|手机号码|电话|电话号码)',
+        r'^(?:所在地区|地区|省市区)',
+        r'^[^：:\s]{2,10}[：:\s]',  # 键值对行
+    ]
+
+    for line in lines:
+        line = line.strip()
+        if not line or len(line) < 2:
+            continue
+        # 跳过明显是地址/联系信息的行
+        if any(re.search(p, line) for p in skip_patterns):
+            continue
+        # 商品模式（宽松匹配）
+        if _looks_like_product(line):
+            order['托寄物内容1'] = line.strip()
+            break
+
+
+def apply_defaults(orders, defaults):
+    """将默认规则应用到所有订单"""
+    # 这些字段不允许从默认值填入，必须来自订单本身
+    NO_DEFAULT_FIELDS = {'托寄物内容1'}
+    result = []
+    for order in orders:
+        merged = copy.deepcopy(defaults)
+        # 移除不允许走默认值的字段
+        for f in NO_DEFAULT_FIELDS:
+            merged.pop(f, None)
+        # 客户数据优先（覆盖默认值）
+        for k, v in order.items():
+            if v:
+                merged[k] = v
+        # 规则写死：寄件人 ⇄ 收件公司 双向互填
+        if merged.get('寄件人') and not merged.get('收件公司'):
+            merged['收件公司'] = merged['寄件人']
+        elif merged.get('收件公司') and not merged.get('寄件人'):
+            merged['寄件人'] = merged['收件公司']
+        result.append(merged)
+    return result
+
+
+def generate_excel(orders, duplicates=None):
+    """基于顺丰官方模版生成填充后的xlsx"""
+    try:
+        wb = load_workbook(SF_TEMPLATE_PATH)
+    except Exception:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = '导入模板'
+        ws.append(SF_COLUMNS)
+    
+    ws = wb['导入模板']
+    
+    # 找到表头行（第1行）
+    header_row = [cell.value for cell in ws[1]]
+    
+    # 构建列名到列索引的映射
+    col_map = {}
+    for i, h in enumerate(header_row, 1):
+        if h:
+            col_map[h] = i
+    
+    # 从第2行开始写数据（第1行是表头）
+    start_row = 2
+    
+    for row_idx, order in enumerate(orders):
+        excel_row = start_row + row_idx
+        for field, value in order.items():
+            if field in col_map and value:
+                ws.cell(row=excel_row, column=col_map[field], value=str(value))
+    
+    # 重复订单行黄色背景标记
+    if duplicates:
+        from openpyxl.styles import PatternFill
+        yellow = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')
+        for dup_idx in duplicates:
+            excel_row = start_row + dup_idx
+            for col in range(1, len(SF_COLUMNS) + 1):
+                ws.cell(row=excel_row, column=col).fill = yellow
+    
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output
+
+
+@app.route('/')
+def index():
+    return app.send_static_file('index.html')
+
+
+@app.route('/api/parse', methods=['POST'])
+def parse():
+    """解析订单文本"""
+    data = request.json
+    raw_text = data.get('text', '')
+    
+    if not raw_text.strip():
+        return jsonify({'success': False, 'error': '请输入订单信息'})
+    
+    try:
+        orders = parse_orders(raw_text)
+        return jsonify({'success': True, 'orders': orders, 'count': len(orders)})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/api/generate', methods=['POST'])
+def generate():
+    """生成Excel文件"""
+    data = request.json
+    orders = data.get('orders', [])
+    defaults = data.get('defaults', {})
+    
+    if not orders:
+        return jsonify({'success': False, 'error': '没有订单数据'})
+    
+    try:
+        final_orders = apply_defaults(orders, defaults)
+        duplicates = data.get('duplicates', [])
+        excel_buf = generate_excel(final_orders, duplicates)
+        
+        date_str = datetime.now().strftime('%Y-%m-%d')
+        filename = f'顺丰{date_str}.xlsx'
+        
+        return send_file(
+            excel_buf,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=filename
+        )
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/api/business_types', methods=['GET'])
+def business_types():
+    """返回业务类型列表"""
+    try:
+        wb = load_workbook(SF_TEMPLATE_PATH)
+        ws = wb['业务类型']
+        types = []
+        for row in ws.iter_rows(min_row=1, values_only=True):
+            if row[0]:
+                types.append(row[0])
+        return jsonify({'types': types})
+    except Exception:
+        default_types = ['顺丰特快', '顺丰标快', '顺丰即日', '顺丰空配', '专线普运', '重货包裹', '标准零担']
+        return jsonify({'types': default_types})
+
+
+# ======================== 统计看板 API ========================
+
+def _stats_file_path(date_str=None):
+    """获取指定日期的统计文件路径，默认今天"""
+    if date_str is None:
+        date_str = datetime.now().strftime('%Y-%m-%d')
+    return os.path.join(STATS_DIR, f'stats_{date_str}.json')
+
+def _cleanup_old_stats():
+    """清理超过30天的统计文件"""
+    cutoff = datetime.now() - timedelta(days=30)
+    pattern = os.path.join(STATS_DIR, 'stats_*.json')
+    for fpath in glob.glob(pattern):
+        try:
+            basename = os.path.basename(fpath)
+            date_str = basename.replace('stats_', '').replace('.json', '')
+            file_date = datetime.strptime(date_str, '%Y-%m-%d')
+            if file_date < cutoff:
+                os.remove(fpath)
+        except (ValueError, OSError):
+            pass  # 文件名格式不对或删除失败，跳过
+
+@app.route('/api/stats/save', methods=['POST'])
+def save_stats():
+    """保存当天导出统计（覆盖写入：同一天多次导出只保留最后一次）"""
+    try:
+        data = request.json
+        stats = data.get('stats', {})
+        today = datetime.now().strftime('%Y-%m-%d')
+        
+        payload = {
+            'date': today,
+            'exported_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'orders_count': stats.get('orders_count', 0),
+            'stats': stats.get('stats', []),
+            'totalQty': stats.get('totalQty', 0),
+            'totalCount': stats.get('totalCount', 0),
+        }
+        
+        with open(_stats_file_path(today), 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        
+        # 自动清理 30 天前的数据
+        _cleanup_old_stats()
+        
+        return jsonify({'success': True, 'date': today})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/stats/today', methods=['GET'])
+def get_today_stats():
+    """获取今天的统计数据"""
+    today = datetime.now().strftime('%Y-%m-%d')
+    fpath = _stats_file_path(today)
+    if not os.path.exists(fpath):
+        return jsonify({'success': True, 'data': None, 'date': today})
+    try:
+        with open(fpath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return jsonify({'success': True, 'data': data, 'date': today})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/stats/history', methods=['GET'])
+def get_history_stats():
+    """获取指定日期的历史统计 ?date=2026-05-20"""
+    date_str = request.args.get('date', '')
+    if not date_str:
+        return jsonify({'success': False, 'error': '请提供 date 参数'}), 400
+    fpath = _stats_file_path(date_str)
+    if not os.path.exists(fpath):
+        return jsonify({'success': True, 'data': None, 'date': date_str})
+    try:
+        with open(fpath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return jsonify({'success': True, 'data': data, 'date': date_str})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/stats/dates', methods=['GET'])
+def list_stats_dates():
+    """列出所有有统计数据的日期（最近30天）"""
+    pattern = os.path.join(STATS_DIR, 'stats_*.json')
+    dates = []
+    for fpath in glob.glob(pattern):
+        try:
+            basename = os.path.basename(fpath)
+            date_str = basename.replace('stats_', '').replace('.json', '')
+            # 验证日期格式
+            datetime.strptime(date_str, '%Y-%m-%d')
+            file_mtime = os.path.getmtime(fpath)
+            dates.append({
+                'date': date_str,
+                'exported_at': datetime.fromtimestamp(file_mtime).strftime('%Y-%m-%d %H:%M:%S')
+            })
+        except (ValueError, OSError):
+            pass
+    dates.sort(key=lambda x: x['date'], reverse=True)
+    return jsonify({'success': True, 'dates': dates})
+
+
+@app.route('/api/upload', methods=['POST'])
+def upload_and_parse():
+    """统一入口：同时处理文本输入 + 多个表格文件，合并返回订单列表"""
+    all_orders = []
+    from_text = 0
+    from_files = 0
+
+    # ---- 1. 解析文本部分 ----
+    text = request.form.get('text', '').strip()
+    if text:
+        try:
+            text_orders = parse_orders(text)
+            all_orders.extend(text_orders)
+            from_text = len(text_orders)
+        except Exception as e:
+            pass
+
+    # ---- 2. 解析上传的文件（支持多个）----
+    uploaded_files = request.files.getlist('files[]')
+    for f in uploaded_files:
+        if not f or not f.filename:
+            continue
+        fname = f.filename.lower()
+        try:
+            if fname.endswith('.csv'):
+                file_orders = _parse_csv_file(f)
+            elif fname.endswith(('.xlsx', '.xls')):
+                file_orders = _parse_excel_file(f)
+            else:
+                continue
+            all_orders.extend(file_orders)
+            from_files += len(file_orders)
+        except Exception as e:
+            # 单个文件失败不阻断其他
+            continue
+
+    if not all_orders:
+        return jsonify({'success': False, 'error': '未能从文本或文件中识别到有效订单'})
+
+    return jsonify({
+        'success': True,
+        'orders': all_orders,
+        'count': len(all_orders),
+        'from_text': from_text,
+        'from_files': from_files,
+    })
+
+
+def _parse_csv_file(file_obj):
+    """解析CSV/TSV文件为订单列表"""
+    orders = []
+    stream = io.TextIOWrapper(file_obj.stream, encoding='utf-8-sig')
+    reader = csv.reader(stream)
+
+    rows = [r for r in reader]
+    if not rows:
+        return orders
+
+    lines = [','.join(r) for r in rows]  # 转成逗号分隔文本
+    return parse_table(lines, ',')
+
+
+def _parse_excel_file(file_obj):
+    """解析Excel文件(xlsx/xls)为订单列表
+
+    支持：
+    - 标准表格（表头在第1行）
+    - 有赞/电商导出（表头在最后一行，如"收货人姓名"在底部）
+    - 多Sheet
+    """
+    # 先保存到临时文件，再用openpyxl打开
+    with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
+        tmp_path = tmp.name
+        file_obj.save(tmp_path)
+
+    try:
+        wb = load_workbook(tmp_path)
+    except Exception as e:
+        os.unlink(tmp_path)
+        raise e
+
+    # 表头关键词（用于检测哪一行是表头）
+    header_keywords = [
+        '收货人姓名', '收件人', '收货人', '联系人', '姓名',
+        '联系电话', '收件电话', '收货电话', '手机', '电话',
+        '收货地址', '收件地址', '地址', '详细地址',
+        '商品名称', '商品规格', '商品', '货物',
+        '订单号', '单号',
+    ]
+
+    # 非数据Sheet名称黑名单（说明页、备注页等不包含订单数据）
+    _skip_sheet_patterns = {'说明', '填写说明', '备注', 'remark', 'note',
+                            '帮助', 'help', '简介', '介绍', '导出说明',
+                            '导出信息', 'export'}
+
+    def _looks_like_header(row_cells):
+        """判断一行是否看起来像表头（包含足够多的表头关键词）"""
+        non_empty = [str(c).strip() for c in row_cells if c is not None and str(c).strip()]
+        if not non_empty:
+            return False, 0
+        match_count = sum(
+            1 for cell in non_empty
+            for kw in header_keywords
+            if kw in cell or cell in kw
+        )
+        # 至少匹配2个关键词才认为是表头行
+        return match_count >= 2, match_count
+
+    def _looks_like_data_row(row_cells):
+        """判断一行是否像真实的订单数据行（而非说明/标题/空行）
+        
+        垃圾行特征：
+        - 全行所有单元格都是短文本描述（如"说明"、"列表：每一行"）
+        - 没有手机号、没有像样的姓名(2-4字汉字)、没有长地址文本
+        """
+        cells = [str(c).strip() for c in row_cells if c is not None and str(c).strip()]
+        if not cells:
+            return False
+        # 如果任一单元格包含手机号，肯定是数据行
+        import re
+        for cell in cells:
+            if re.search(r'1[3-9]\d{9}', cell):
+                return True
+        # 检查是否有像样长的内容（真实订单行通常有地址等长文本）
+        long_cells = [c for c in cells if len(c) > 15]
+        if len(long_cells) >= 1:
+            return True
+        # 所有单元格都很短（≤15字符），大概率是标题/说明行
+        # 典型垃圾："说明", "采购商品列表：每一行为...", "列表"
+        return False
+
+    all_orders = []
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+
+        # === Bug13修复: 跳过非数据Sheet ===
+        sheet_clean = sheet_name.strip()
+        if sheet_clean in _skip_sheet_patterns or any(p in sheet_clean for p in _skip_sheet_patterns):
+            continue
+
+        data_rows = list(ws.iter_rows(values_only=True))
+        if not data_rows or not any(data_rows[0]):
+            continue
+
+        total_rows = len(data_rows)
+        if total_rows < 2:
+            continue
+
+        # === 检测表头位置：顶部(第1行) vs 底部(最后1行) ===
+        first_is_header, first_score = _looks_like_header(data_rows[0])
+        last_is_header, last_score = _looks_like_header(data_rows[-1])
+
+        if last_is_header and not first_is_header:
+            # 底部表头模式（有赞等电商导出）
+            header_row = data_rows[-1]
+            data_lines = data_rows[:-1]  # 表头之前全是数据
+        elif first_is_header:
+            # 标准表头在顶部
+            header_row = data_rows[0]
+            data_lines = data_rows[1:]
+        elif last_is_header and first_is_header:
+            # 两头都像表头，优先用底部的（更可能是有赞格式）
+            header_row = data_rows[-1]
+            data_lines = data_rows[:-1]
+        else:
+            # 都不像表头，当作无表头数据处理
+            header_row = None
+            data_lines = data_rows
+
+        # === Bug13修复: 过滤掉非订单数据行（说明文字、标题行等）===
+        if header_row is not None:
+            # 有表头时，过滤data_lines中看起来不像数据的行
+            data_lines = [row for row in data_lines if _looks_like_data_row(row)]
+        else:
+            # 无表头时更严格：必须像数据行
+            data_lines = [row for row in data_rows if _looks_like_data_row(row)]
+
+        lines = []
+        if header_row is not None:
+            # 先输出表头行（让 parse_table 能识别）
+            cells = [str(c).strip() if c is not None else '' for c in header_row]
+            lines.append('\t'.join(cells))
+
+        for row_data in data_lines:
+            cells = [str(c).strip() if c is not None else '' for c in row_data]
+            lines.append('\t'.join(cells))
+
+        sheet_orders = parse_table(lines, '\t')
+        all_orders.extend(sheet_orders)
+
+    os.unlink(tmp_path)
+    return all_orders
+
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5001))
+    debug = os.environ.get('DEBUG', 'true').lower() == 'true'
+    app.run(debug=debug, port=port, host='0.0.0.0')

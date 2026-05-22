@@ -1,0 +1,167 @@
+#!/bin/bash
+# ============================================
+# 顺丰订单系统 — 本地服务管理脚本
+# ============================================
+# 用法: ./sfs {start|stop|restart|status|tunnel|log}
+# ============================================
+
+set -e
+
+SERVICE_NAME="com.sf-order"
+PLIST_PATH="$HOME/Library/LaunchAgents/${SERVICE_NAME}.plist"
+APP_DIR="$(cd "$(dirname "$0")" && pwd)"
+PORT=5001
+TUNNEL_PID_FILE="$APP_DIR/.tunnel_pid"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+info()  { echo -e "${GREEN}✔${NC} $1"; }
+warn()  { echo -e "${YELLOW}⚠${NC} $1"; }
+err()   { echo -e "${RED}✘${NC} $1"; }
+title() { echo -e "${CYAN}$1${NC}"; }
+
+check_running() {
+    launchctl list | grep -q "$SERVICE_NAME" 2>/dev/null
+}
+
+tunnel_running() {
+    [ -f "$TUNNEL_PID_FILE" ] && kill -0 "$(cat "$TUNNEL_PID_FILE")" 2>/dev/null
+}
+
+do_start() {
+    title "🚀 启动顺丰订单系统"
+    if check_running; then
+        warn "服务已在运行中: http://localhost:$PORT"
+        return 0
+    fi
+    launchctl load "$PLIST_PATH" 2>/dev/null
+    sleep 2
+    if check_running; then
+        local pid=$(launchctl list | grep "$SERVICE_NAME" | awk '{print $1}')
+        info "服务启动成功 (PID: $pid)"
+        info "本地地址: http://localhost:$PORT"
+    else
+        err "启动失败，查看日志: ./sfs log"
+    fi
+}
+
+do_stop() {
+    title "🛑 停止顺丰订单系统"
+    do_tunnel_stop 2>/dev/null
+    if check_running; then
+        launchctl unload "$PLIST_PATH" 2>/dev/null
+        sleep 1
+    fi
+    if check_running; then
+        err "停止失败"
+    else
+        info "服务已停止"
+    fi
+}
+
+do_restart() {
+    title "🔄 重启顺丰订单系统"
+    do_stop
+    sleep 1
+    do_start
+}
+
+do_status() {
+    title "📊 顺丰订单系统 — 状态"
+    echo ""
+
+    if check_running; then
+        local pid=$(launchctl list | grep "$SERVICE_NAME" | awk '{print $1}')
+        info "服务状态: 运行中 (PID: $pid)"
+        echo "   本地地址: http://localhost:$PORT"
+
+        if curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT/" 2>/dev/null | grep -q 200; then
+            info "HTTP 响应: 正常"
+        else
+            warn "HTTP 响应: 异常"
+        fi
+    else
+        err "服务状态: 未运行"
+    fi
+
+    echo ""
+    if tunnel_running; then
+        info "公网隧道: 已开启"
+    else
+        warn "公网隧道: 未开启 (执行 ./sfs tunnel 开启)"
+    fi
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "开机自启: 已启用 (launchd)"
+    echo "日志路径: $APP_DIR/Logs/"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+}
+
+do_tunnel_start() {
+    if tunnel_running; then
+        warn "公网隧道已在运行中"
+        return 0
+    fi
+    title "🌐 启动公网隧道"
+    cd "$APP_DIR"
+    /Users/mac/.workbuddy/binaries/node/versions/22.12.0/bin/npx \
+        --yes localtunnel --port $PORT \
+        > "$APP_DIR/Logs/tunnel.log" 2>&1 &
+    local pid=$!
+    echo "$pid" > "$TUNNEL_PID_FILE"
+    sleep 5
+    if tunnel_running; then
+        local url=$(grep -o 'https://[^ ]*\.loca\.lt' "$APP_DIR/Logs/tunnel.log" | tail -1)
+        info "公网地址: $url"
+    else
+        err "隧道启动失败"
+    fi
+}
+
+do_tunnel_stop() {
+    if tunnel_running; then
+        kill "$(cat "$TUNNEL_PID_FILE")" 2>/dev/null
+        rm -f "$TUNNEL_PID_FILE"
+        info "隧道已关闭"
+    fi
+}
+
+do_tunnel() {
+    if tunnel_running; then
+        do_tunnel_stop
+    else
+        do_tunnel_start
+    fi
+}
+
+do_log() {
+    echo "=== stdout ==="
+    tail -50 "$APP_DIR/Logs/stdout.log" 2>/dev/null || echo "(空)"
+    echo ""
+    echo "=== stderr ==="
+    tail -20 "$APP_DIR/Logs/stderr.log" 2>/dev/null || echo "(空)"
+}
+
+case "${1:-status}" in
+    start)   do_start ;;
+    stop)    do_stop ;;
+    restart) do_restart ;;
+    status)  do_status ;;
+    tunnel)  do_tunnel ;;
+    log)     do_log ;;
+    *)
+        echo "用法: ./sfs {start|stop|restart|status|tunnel|log}"
+        echo ""
+        echo "  start    — 启动服务"
+        echo "  stop     — 停止服务"
+        echo "  restart  — 重启服务"
+        echo "  status   — 查看状态"
+        echo "  tunnel   — 开关公网隧道"
+        echo "  log      — 查看日志"
+        ;;
+esac
