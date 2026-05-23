@@ -5,3 +5,6 @@ stats/
 Logs/
 *.log
 .env
+orders.db
+cloudflared*
+*.tgz

@@ -12,13 +12,121 @@ import copy
 import csv
 import tempfile
 import glob
+import sqlite3
+import functools
 from datetime import datetime, timedelta
-from flask import Flask, request, jsonify, send_file
-from flask import Response
+from flask import Flask, request, jsonify, send_file, session, redirect, url_for
+from flask import Response, render_template_string
 import openpyxl
 from openpyxl import load_workbook
 
 app = Flask(__name__, static_folder='.', static_url_path='')
+app.secret_key = 'sf-order-system-2026-secret-key'
+
+# ======================== 数据库初始化 ========================
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'orders.db')
+
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    conn = get_db()
+    c = conn.cursor()
+    # 用户表
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            is_admin INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        )
+    ''')
+    # 兼容旧库升级：如果 is_admin 列不存在则添加
+    try:
+        c.execute('SELECT is_admin FROM users LIMIT 1')
+    except sqlite3.OperationalError:
+        c.execute('ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0')
+    # 订单表：status='pending' 未导出，'exported' 已导出
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            order_data TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            batch_id TEXT,
+            created_at TEXT NOT NULL,
+            exported_at TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    ''')
+    # 地址簿分组表
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS address_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    ''')
+    # 地址簿明细表
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS address_book (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            group_id INTEGER NOT NULL,
+            name TEXT NOT NULL DEFAULT '',
+            phone TEXT NOT NULL DEFAULT '',
+            address TEXT NOT NULL DEFAULT '',
+            product TEXT NOT NULL DEFAULT '',
+            quantity TEXT NOT NULL DEFAULT '1',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            FOREIGN KEY (group_id) REFERENCES address_groups(id) ON DELETE CASCADE
+        )
+    ''')
+    # 创建默认管理员账号 lmy123 / lmy123（超级管理员）
+    c.execute('SELECT id, is_admin FROM users WHERE username = ?', ('lmy123',))
+    existing = c.fetchone()
+    if not existing:
+        c.execute(
+            'INSERT INTO users (username, password, is_admin, created_at) VALUES (?, ?, 1, ?)',
+            ('lmy123', 'lmy123', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        )
+    elif not existing['is_admin']:
+        c.execute('UPDATE users SET is_admin = 1 WHERE username = ?', ('lmy123',))
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# ======================== 登录验证装饰器 ========================
+def login_required(f):
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if 'user_id' not in session:
+            if request.path.startswith('/api/'):
+                return jsonify({'success': False, 'error': '请先登录'}), 401
+            return redirect('/login')
+        return f(*args, **kwargs)
+    return decorated
+
+# ======================== 管理员验证装饰器 ========================
+def admin_required(f):
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if 'user_id' not in session:
+            return jsonify({'success': False, 'error': '请先登录'}), 401
+        if not session.get('is_admin'):
+            return jsonify({'success': False, 'error': '需要管理员权限'}), 403
+        return f(*args, **kwargs)
+    return decorated
 
 SF_TEMPLATE_PATH = os.environ.get(
     'SF_TEMPLATE_PATH',
@@ -381,8 +489,37 @@ def parse_freetext(text):
     return orders
 
 
+def _strip_receiver_label(block):
+    """
+    剥离块首的「收货人信息:」/「收件人信息:」等标签行前缀。
+    支持两种形式：
+      1. 标签与姓名在同一行：「收货人信息: 张小雪 138xxxx」→ 「张小雪 138xxxx」
+      2. 标签独占一行：「收货人信息:\n张小雪 138xxxx」→ 「张小雪 138xxxx」
+    """
+    # 匹配行首的 "收货人信息:"/"收件人信息:"/"收货人:"/"收件人信息:" 等标签
+    label_pattern = re.compile(
+        r'^(?:收货人信息|收件人信息|收货信息|收件信息)\s*[：:]\s*',
+        re.MULTILINE
+    )
+    lines = block.split('\n')
+    first_line = lines[0].strip()
+    m = label_pattern.match(first_line)
+    if m:
+        remainder = first_line[m.end():].strip()
+        if remainder:
+            # 标签和内容在同一行，直接把标签去掉
+            lines[0] = remainder
+        else:
+            # 标签独占一行，删掉这行
+            lines = lines[1:]
+        block = '\n'.join(lines)
+    return block
+
+
 def _dispatch_and_parse(block):
     """判断block格式类型，分发给对应解析器"""
+    # 预处理：剥离「收货人信息:」等标签前缀（不影响其他格式）
+    block = _strip_receiver_label(block)
     fmt = _classify_block_format(block)
 
     if fmt == 'structured':
@@ -1120,12 +1257,475 @@ def generate_excel(orders, duplicates=None):
     return output
 
 
+# ======================== 登录/登出路由 ========================
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'GET':
+        # 返回登录页 HTML
+        html = '''
+        <!DOCTYPE html>
+        <html lang="zh-CN">
+        <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>登录 - 顺丰快递模版录入系统</title>
+        <style>
+          * { box-sizing: border-box; margin:0; padding:0; }
+          body { font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif;
+                 background: linear-gradient(135deg, #e5000e 0%, #ff4444 100%);
+                 min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+          .login-box { background: white; border-radius: 16px; box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+                        padding: 48px 40px; width: 380px; text-align: center; }
+          .logo { color: #e5000e; font-size: 48px; margin-bottom: 8px; }
+          .title { font-size: 20px; font-weight: 700; color: #1a1a2e; margin-bottom: 4px; }
+          .subtitle { font-size: 13px; color: #6b7280; margin-bottom: 32px; }
+          .field { text-align: left; margin-bottom: 18px; }
+          .field label { display: block; font-size: 13px; color: #374151; font-weight: 500; margin-bottom: 6px; }
+          .field input { width: 100%; padding: 10px 14px; border: 1px solid #d1d5db; border-radius: 8px;
+                         font-size: 14px; outline: none; transition: border 0.2s; }
+          .field input:focus { border-color: #e5000e; box-shadow: 0 0 0 3px rgba(229,0,14,0.1); }
+          .btn { width: 100%; padding: 12px; background: linear-gradient(135deg, #e5000e, #ff4444);
+                        border: none; border-radius: 8px; color: white; font-size: 15px; font-weight: 600;
+                        cursor: pointer; transition: opacity 0.2s; }
+          .btn:hover { opacity: 0.9; }
+          .error { background: #fef2f2; color: #dc2626; padding: 10px 14px; border-radius: 8px;
+                    font-size: 13px; margin-bottom: 16px; display: none; }
+          .footer { margin-top: 24px; font-size: 11px; color: #9ca3af; }
+        </style>
+        </head>
+        <body>
+        <div class="login-box">
+          <div class="logo">📦</div>
+          <div class="title">顺丰快递模版录入系统</div>
+          <div class="subtitle">请登录后使用</div>
+          <div class="error" id="err"></div>
+          <form method="POST" onsubmit="return doLogin(event)">
+            <div class="field">
+              <label>账号</label>
+              <input type="text" name="username" id="username" placeholder="请输入账号" required autofocus>
+            </div>
+            <div class="field">
+              <label>密码</label>
+              <input type="password" name="password" id="password" placeholder="请输入密码" required>
+            </div>
+            <button class="btn" type="submit">登 录</button>
+          </form>
+          <div class="footer">顺丰模版录入系统 v2.0</div>
+        </div>
+        <script>
+        function doLogin(e) {
+          e.preventDefault();
+          const err = document.getElementById('err');
+          err.style.display = 'none';
+          fetch('/api/login', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+              username: document.getElementById('username').value.trim(),
+              password: document.getElementById('password').value
+            })
+          }).then(r=>r.json()).then(d=>{
+            if(d.success) { window.location.href = '/'; }
+            else { err.innerText = d.error||'登录失败'; err.style.display='block'; }
+          }).catch(()=>{
+            err.innerText = '网络错误，请重试'; err.style.display='block';
+          });
+          return false;
+        }
+        </script>
+        </body>
+        </html>
+        '''
+        return html
+    # POST 登录逻辑在 /api/login 处理
+
+
+@app.route('/api/login', methods=['POST'])
+def api_login():
+    data = request.json
+    username = data.get('username', '').strip()
+    password = data.get('password', '')
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('SELECT id, username, is_admin FROM users WHERE username=? AND password=?', (username, password))
+    user = c.fetchone()
+    conn.close()
+    if user:
+        session['user_id'] = user['id']
+        session['username'] = user['username']
+        session['is_admin'] = bool(user['is_admin'])
+        return jsonify({'success': True, 'is_admin': bool(user['is_admin'])})
+    return jsonify({'success': False, 'error': '账号或密码错误'}), 401
+
+
+@app.route('/api/me', methods=['GET'])
+def api_me():
+    if 'user_id' in session:
+        return jsonify({
+            'username': session.get('username', ''),
+            'is_admin': session.get('is_admin', False)
+        })
+    return jsonify({'username': '', 'is_admin': False})
+
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect('/login')
+
+
+# ======================== 订单数据 API ========================
+
+@app.route('/api/orders/save', methods=['POST'])
+@login_required
+def save_orders():
+    """保存订单到数据库（status=pending，未导出）
+    采用全量覆盖策略：先删除该用户所有 pending 订单，再插入最新数据，避免重复累积。
+    """
+    data = request.json
+    orders = data.get('orders', [])
+    batch_id = data.get('batch_id', datetime.now().strftime('%Y%m%d%H%M%S'))
+    user_id = session['user_id']
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    conn = get_db()
+    c = conn.cursor()
+    # 全量覆盖：先删后插，避免重复累积
+    c.execute('DELETE FROM orders WHERE user_id=? AND status=?', (user_id, 'pending'))
+    for o in orders:
+        c.execute(
+            'INSERT INTO orders (user_id, order_data, status, batch_id, created_at) VALUES (?, ?, ?, ?, ?)',
+            (user_id, json.dumps(o, ensure_ascii=False), 'pending', batch_id, now)
+        )
+    conn.commit()
+    count = len(orders)
+    conn.close()
+    return jsonify({'success': True, 'saved': count, 'batch_id': batch_id})
+
+
+@app.route('/api/orders/load', methods=['GET'])
+@login_required
+def load_orders():
+    """加载当前用户的未导出订单（status=pending）"""
+    user_id = session['user_id']
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        'SELECT id, order_data, batch_id, created_at FROM orders WHERE user_id=? AND status=? ORDER BY id ASC',
+        (user_id, 'pending')
+    )
+    rows = c.fetchall()
+    orders = []
+    for row in rows:
+        item = json.loads(row['order_data'])
+        item['_db_id'] = row['id']
+        orders.append(item)
+    conn.close()
+    return jsonify({'success': True, 'orders': orders})
+
+
+@app.route('/api/orders/clear', methods=['POST'])
+@login_required
+def clear_orders():
+    """标记已导出的订单为 exported（不清空，保留记录）"""
+    data = request.json
+    batch_id = data.get('batch_id', '')
+    user_id = session['user_id']
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    conn = get_db()
+    c = conn.cursor()
+    if batch_id:
+        c.execute(
+            'UPDATE orders SET status=?, exported_at=? WHERE user_id=? AND batch_id=? AND status=?',
+            ('exported', now, user_id, batch_id, 'pending')
+        )
+    else:
+        c.execute(
+            'UPDATE orders SET status=?, exported_at=? WHERE user_id=? AND status=?',
+            ('exported', now, user_id, 'pending')
+        )
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True})
+
+
+@app.route('/api/orders/delete', methods=['POST'])
+@login_required
+def delete_order():
+    """删除单条未导出订单"""
+    data = request.json
+    db_id = data.get('id')
+    user_id = session['user_id']
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('DELETE FROM orders WHERE id=? AND user_id=? AND status=?', (db_id, user_id, 'pending'))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True})
+
+# ======================== 用户管理 API（仅管理员） ========================
+
+@app.route('/api/users/list', methods=['GET'])
+@admin_required
+def list_users():
+    """获取所有用户列表（仅管理员）"""
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('SELECT id, username, is_admin, created_at FROM users ORDER BY id ASC')
+    users = [dict(row) for row in c.fetchall()]
+    conn.close()
+    return jsonify({'success': True, 'users': users})
+
+
+@app.route('/api/users/add', methods=['POST'])
+@admin_required
+def add_user():
+    """添加新用户（仅管理员）"""
+    data = request.json
+    username = data.get('username', '').strip()
+    password = data.get('password', '').strip()
+    
+    if not username or not password:
+        return jsonify({'success': False, 'error': '用户名和密码不能为空'}), 400
+    if len(username) < 2 or len(username) > 32:
+        return jsonify({'success': False, 'error': '用户名长度需在 2-32 字符之间'}), 400
+    if len(password) < 4:
+        return jsonify({'success': False, 'error': '密码长度不能少于 4 位'}), 400
+    if not re.match(r'^[\w\u4e00-\u9fa5]+$', username):
+        return jsonify({'success': False, 'error': '用户名仅支持中文、字母、数字和下划线'}), 400
+    
+    conn = get_db()
+    c = conn.cursor()
+    # 检查是否已存在
+    c.execute('SELECT id FROM users WHERE username = ?', (username,))
+    if c.fetchone():
+        conn.close()
+        return jsonify({'success': False, 'error': f'用户 "{username}" 已存在'}), 409
+    
+    c.execute(
+        'INSERT INTO users (username, password, is_admin, created_at) VALUES (?, ?, 0, ?)',
+        (username, password, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    )
+    conn.commit()
+    new_id = c.lastrowid
+    conn.close()
+    return jsonify({'success': True, 'id': new_id, 'username': username})
+
+
+@app.route('/api/users/delete', methods=['POST'])
+@admin_required
+def delete_user_api():
+    """删除用户（仅管理员，不能删除自己）"""
+    data = request.json
+    target_id = data.get('id')
+    if not target_id:
+        return jsonify({'success': False, 'error': '请指定要删除的用户 ID'}), 400
+    
+    # 不能删除自己
+    if int(target_id) == session.get('user_id'):
+        return jsonify({'success': False, 'error': '不能删除当前登录的管理员账号'}), 400
+    
+    # 不能删除其他管理员
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('SELECT id, username, is_admin FROM users WHERE id = ?', (target_id,))
+    target = c.fetchone()
+    if not target:
+        conn.close()
+        return jsonify({'success': False, 'error': '用户不存在'}), 404
+    if target['is_admin']:
+        conn.close()
+        return jsonify({'success': False, 'error': f'不能删除管理员 "{target["username"]}"'}), 403
+    
+    # 删除该用户的所有订单
+    c.execute('DELETE FROM orders WHERE user_id = ?', (target_id,))
+    # 删除用户
+    c.execute('DELETE FROM users WHERE id = ?', (target_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'deleted': target['username']})
+
+
+# ======================== 地址簿 API ========================
+
+@app.route('/api/address/groups', methods=['GET'])
+@login_required
+def list_address_groups():
+    """获取当前用户的地址簿分组列表"""
+    user_id = session['user_id']
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        'SELECT id, name, sort_order, created_at FROM address_groups WHERE user_id=? ORDER BY sort_order ASC, id ASC',
+        (user_id,)
+    )
+    groups = [dict(row) for row in c.fetchall()]
+    conn.close()
+    return jsonify({'success': True, 'groups': groups})
+
+
+@app.route('/api/address/groups', methods=['POST'])
+@login_required
+def create_address_group():
+    """创建地址簿分组"""
+    data = request.json
+    name = data.get('name', '').strip()
+    if not name:
+        return jsonify({'success': False, 'error': '分组名称不能为空'}), 400
+    if len(name) > 20:
+        return jsonify({'success': False, 'error': '分组名称不能超过20个字符'}), 400
+
+    user_id = session['user_id']
+    conn = get_db()
+    c = conn.cursor()
+    # 获取当前最大 sort_order
+    c.execute('SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM address_groups WHERE user_id=?', (user_id,))
+    next_order = c.fetchone()['next_order']
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    c.execute(
+        'INSERT INTO address_groups (user_id, name, sort_order, created_at) VALUES (?, ?, ?, ?)',
+        (user_id, name, next_order, now)
+    )
+    conn.commit()
+    new_id = c.lastrowid
+    conn.close()
+    return jsonify({'success': True, 'id': new_id, 'name': name})
+
+
+@app.route('/api/address/groups/<int:group_id>', methods=['PUT'])
+@login_required
+def rename_address_group(group_id):
+    """重命名地址簿分组"""
+    data = request.json
+    name = data.get('name', '').strip()
+    if not name:
+        return jsonify({'success': False, 'error': '分组名称不能为空'}), 400
+    if len(name) > 20:
+        return jsonify({'success': False, 'error': '分组名称不能超过20个字符'}), 400
+
+    user_id = session['user_id']
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('UPDATE address_groups SET name=? WHERE id=? AND user_id=?', (name, group_id, user_id))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True})
+
+
+@app.route('/api/address/groups/<int:group_id>', methods=['DELETE'])
+@login_required
+def delete_address_group(group_id):
+    """删除地址簿分组（同时删除其下所有地址）"""
+    user_id = session['user_id']
+    conn = get_db()
+    c = conn.cursor()
+    # 先删除该分组下的所有地址
+    c.execute('DELETE FROM address_book WHERE group_id=? AND user_id=?', (group_id, user_id))
+    # 再删除分组
+    c.execute('DELETE FROM address_groups WHERE id=? AND user_id=?', (group_id, user_id))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True})
+
+
+@app.route('/api/address/list', methods=['GET'])
+@login_required
+def list_addresses():
+    """获取指定分组的地址列表"""
+    group_id = request.args.get('group_id', type=int)
+    if not group_id:
+        return jsonify({'success': False, 'error': '请指定 group_id'}), 400
+
+    user_id = session['user_id']
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        'SELECT id, group_id, name, phone, address, product, quantity, created_at FROM address_book WHERE user_id=? AND group_id=? ORDER BY id ASC',
+        (user_id, group_id)
+    )
+    addresses = [dict(row) for row in c.fetchall()]
+    conn.close()
+    return jsonify({'success': True, 'addresses': addresses})
+
+
+@app.route('/api/address/add', methods=['POST'])
+@login_required
+def add_address():
+    """添加地址到指定分组"""
+    data = request.json
+    group_id = data.get('group_id')
+    if not group_id:
+        return jsonify({'success': False, 'error': '请指定分组'}), 400
+
+    name = data.get('name', '').strip()
+    phone = data.get('phone', '').strip()
+    address = data.get('address', '').strip()
+    product = data.get('product', '').strip()
+    quantity = data.get('quantity', '').strip() or '1'
+
+    if not name or not phone or not address:
+        return jsonify({'success': False, 'error': '收件人、电话、地址不能为空'}), 400
+
+    user_id = session['user_id']
+    conn = get_db()
+    c = conn.cursor()
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    c.execute(
+        'INSERT INTO address_book (user_id, group_id, name, phone, address, product, quantity, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        (user_id, group_id, name, phone, address, product, quantity, now)
+    )
+    conn.commit()
+    new_id = c.lastrowid
+    conn.close()
+    return jsonify({'success': True, 'id': new_id})
+
+
+@app.route('/api/address/<int:addr_id>', methods=['PUT'])
+@login_required
+def update_address(addr_id):
+    """更新地址信息"""
+    data = request.json
+    user_id = session['user_id']
+    conn = get_db()
+    c = conn.cursor()
+
+    updates = {}
+    for field in ['name', 'phone', 'address', 'product', 'quantity', 'group_id']:
+        if field in data:
+            updates[field] = data[field].strip() if isinstance(data[field], str) else data[field]
+
+    if not updates:
+        return jsonify({'success': False, 'error': '没有需要更新的字段'}), 400
+
+    set_clause = ', '.join(f'{k}=?' for k in updates)
+    values = list(updates.values()) + [addr_id, user_id]
+    c.execute(f'UPDATE address_book SET {set_clause} WHERE id=? AND user_id=?', values)
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True})
+
+
+@app.route('/api/address/<int:addr_id>', methods=['DELETE'])
+@login_required
+def delete_address(addr_id):
+    """删除单条地址"""
+    user_id = session['user_id']
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('DELETE FROM address_book WHERE id=? AND user_id=?', (addr_id, user_id))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True})
+
+
 @app.route('/')
+@login_required
 def index():
     return app.send_static_file('index.html')
 
 
 @app.route('/api/parse', methods=['POST'])
+@login_required
 def parse():
     """解析订单文本"""
     data = request.json
@@ -1142,6 +1742,7 @@ def parse():
 
 
 @app.route('/api/generate', methods=['POST'])
+@login_required
 def generate():
     """生成Excel文件"""
     data = request.json
@@ -1170,6 +1771,7 @@ def generate():
 
 
 @app.route('/api/business_types', methods=['GET'])
+@login_required
 def business_types():
     """返回业务类型列表"""
     try:
@@ -1208,6 +1810,7 @@ def _cleanup_old_stats():
             pass  # 文件名格式不对或删除失败，跳过
 
 @app.route('/api/stats/save', methods=['POST'])
+@login_required
 def save_stats():
     """保存当天导出统计（覆盖写入：同一天多次导出只保留最后一次）"""
     try:
@@ -1235,6 +1838,7 @@ def save_stats():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/stats/today', methods=['GET'])
+@login_required
 def get_today_stats():
     """获取今天的统计数据"""
     today = datetime.now().strftime('%Y-%m-%d')
@@ -1249,6 +1853,7 @@ def get_today_stats():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/stats/history', methods=['GET'])
+@login_required
 def get_history_stats():
     """获取指定日期的历史统计 ?date=2026-05-20"""
     date_str = request.args.get('date', '')

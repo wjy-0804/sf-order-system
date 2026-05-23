@@ -199,6 +199,13 @@
     transition: all 0.15s; margin: 0 auto;
   }
   .btn-delete-row:hover { background: #fef2f2; color: #dc2626; transform: scale(1.15); }
+  .btn-copy-row {
+    width: 28px; height: 28px; border-radius: 50%; border: none;
+    background: transparent; color: #6366f1; font-size: 14px;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    transition: all 0.15s; margin: 0 auto;
+  }
+  .btn-copy-row:hover { background: #ede9fe; color: #4f46e5; transform: scale(1.15); }
   .btn-success { background: var(--success); color: white; }
   .btn-success:hover { background: #059669; }
   .btn-sm { padding: 6px 14px; font-size: 13px; }
@@ -470,6 +477,183 @@
   }
   .multi-mode-badge.show { display: inline-block;animation: pulse-badge 1s ease-in-out infinite alternate; }
   @keyframes pulse-badge { from {opacity: 1} to {opacity: 0.6} }
+
+  /* Admin Modal */
+  .modal-overlay {
+    display: none;
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.45);
+    z-index: 9998;
+    align-items: center; justify-content: center;
+  }
+  .modal-overlay.show { display: flex; }
+  .modal-box {
+    background: var(--card);
+    border-radius: 14px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.25);
+    width: 520px; max-width: 95vw;
+    max-height: 85vh; overflow-y: auto;
+    animation: modalIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  @keyframes modalIn { from { opacity: 0; transform: scale(0.95) translateY(-20px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+  .modal-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 18px 24px; border-bottom: 1px solid var(--border);
+  }
+  .modal-title { font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+  .modal-close {
+    width: 32px; height: 32px; border-radius: 8px; border: none;
+    background: var(--bg); cursor: pointer;
+    font-size: 18px; color: var(--text-muted);
+    display: flex; align-items: center; justify-content: center;
+    transition: all 0.15s;
+  }
+  .modal-close:hover { background: #fee2e2; color: #dc2626; }
+  .modal-body { padding: 20px 24px; }
+  .modal-footer { padding: 14px 24px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 10px; }
+
+  .user-list-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .user-list-table th {
+    text-align: left; padding: 8px 12px;
+    font-weight: 600; color: var(--text-muted);
+    border-bottom: 2px solid var(--border);
+  }
+  .user-list-table td { padding: 10px 12px; border-bottom: 1px solid #f0f2f5; }
+  .user-list-table tr:hover td { background: #fafbfc; }
+  .admin-badge {
+    display: inline-block; background: #fef3c7; color: #92400e;
+    font-size: 11px; padding: 2px 8px; border-radius: 10px;
+    font-weight: 600;
+  }
+
+  .add-user-form {
+    display: flex; gap: 10px; align-items: flex-end;
+    margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border);
+  }
+  .add-user-form .form-group { flex: 1; margin-bottom: 0; }
+  .add-user-form input { font-size: 13px; padding: 8px 12px; }
+  .add-user-form .btn { flex-shrink: 0; align-self: flex-end; }
+
+  /* Address Book Modal */
+  .addr-modal-box {
+    width: 850px; max-width: 95vw;
+  }
+  .addr-layout {
+    display: flex; gap: 0; min-height: 420px; max-height: 65vh;
+  }
+  .addr-sidebar {
+    width: 200px; flex-shrink: 0;
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  .addr-sidebar-header {
+    padding: 12px 14px; border-bottom: 1px solid var(--border);
+    font-weight: 600; font-size: 13px; color: var(--text-muted);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .addr-sidebar-header button {
+    width: 24px; height: 24px; border-radius: 6px; border: none;
+    background: var(--bg); cursor: pointer; font-size: 14px; color: var(--text-muted);
+    display: flex; align-items: center; justify-content: center;
+    transition: all 0.15s;
+  }
+  .addr-sidebar-header button:hover { background: var(--primary-light); color: var(--primary); }
+  .addr-group-list {
+    flex: 1; overflow-y: auto; padding: 6px 0;
+  }
+  .addr-group-item {
+    padding: 10px 14px; cursor: pointer; font-size: 13px;
+    display: flex; align-items: center; justify-content: space-between;
+    transition: all 0.15s; border-left: 3px solid transparent;
+    color: var(--text); position: relative;
+  }
+  .addr-group-item:hover { background: var(--bg); }
+  .addr-group-item.active {
+    background: var(--primary-light); color: var(--primary);
+    border-left-color: var(--primary); font-weight: 600;
+  }
+  .addr-group-item .group-actions {
+    display: none; gap: 2px;
+  }
+  .addr-group-item:hover .group-actions { display: flex; }
+  .addr-group-item.active .group-actions { display: flex; }
+  .addr-group-item .group-act-btn {
+    width: 22px; height: 22px; border-radius: 4px; border: none;
+    background: transparent; cursor: pointer; font-size: 11px;
+    color: var(--text-muted); display: flex; align-items: center; justify-content: center;
+  }
+  .addr-group-item .group-act-btn:hover { background: rgba(0,0,0,0.08); }
+  .addr-group-item .group-act-btn.del:hover { background: #fee2e2; color: #dc2626; }
+
+  .addr-content {
+    flex: 1; display: flex; flex-direction: column; overflow: hidden;
+  }
+  .addr-content-header {
+    padding: 12px 16px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+    font-weight: 600; font-size: 13px;
+  }
+  .addr-content-header .btn { font-size: 12px; padding: 4px 12px; }
+  .addr-list {
+    flex: 1; overflow-y: auto; padding: 8px 0;
+  }
+  .addr-empty {
+    text-align: center; padding: 40px 20px; color: var(--text-muted); font-size: 13px;
+  }
+  .addr-item {
+    padding: 10px 16px; display: flex; align-items: flex-start; gap: 10px;
+    border-bottom: 1px solid #f5f5f5; transition: background 0.15s;
+    cursor: pointer;
+  }
+  .addr-item:hover { background: #fafbfc; }
+  .addr-item.selected { background: #f0fdf4; }
+  .addr-item input[type="checkbox"] {
+    width: 16px; height: 16px; margin-top: 2px; flex-shrink: 0; accent-color: var(--primary);
+  }
+  .addr-item-info { flex: 1; min-width: 0; }
+  .addr-item-name {
+    font-weight: 600; font-size: 14px; margin-bottom: 2px;
+  }
+  .addr-item-detail {
+    font-size: 12px; color: var(--text-muted); line-height: 1.5;
+  }
+  .addr-item-detail span { margin-right: 10px; }
+  .addr-item-actions {
+    display: flex; gap: 4px; flex-shrink: 0; margin-top: 2px;
+  }
+  .addr-item-actions button {
+    width: 26px; height: 26px; border-radius: 6px; border: none;
+    background: var(--bg); cursor: pointer; font-size: 12px;
+    color: var(--text-muted); transition: all 0.15s;
+  }
+  .addr-item-actions button:hover { background: var(--border); }
+  .addr-item-actions button.del-addr:hover { background: #fee2e2; color: #dc2626; }
+
+  .addr-footer {
+    padding: 12px 16px; border-top: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .addr-footer .selected-count {
+    font-size: 12px; color: var(--text-muted);
+  }
+  .addr-footer .selected-count b { color: var(--primary); }
+
+  /* Address Edit Form (inline in list) */
+  .addr-edit-form {
+    padding: 12px 16px; border-bottom: 1px solid var(--border);
+    background: #fafbfc;
+  }
+  .addr-edit-form .form-row {
+    display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap;
+  }
+  .addr-edit-form input {
+    padding: 7px 10px; font-size: 13px; border-radius: 6px;
+    flex: 1; min-width: 100px;
+  }
+  .addr-edit-form .form-actions {
+    display: flex; gap: 6px; justify-content: flex-end;
+  }
 </style>
 </head>
 <body>
@@ -484,6 +668,9 @@
     顺丰快递模版录入系统
   </div>
   <div style="display:flex;gap:10px;align-items:center;">
+    <span class="header-tag" id="userTag" style="display:none;">👤 <span id="usernameDisplay"></span></span>
+    <button class="header-tag" id="adminBtn" onclick="openUserManager()" style="display:none;cursor:pointer;border:none;color:white;background:rgba(255,255,255,0.2);padding:4px 12px;border-radius:20px;font-size:12px;font-weight:500;">👥 用户管理</button>
+    <button class="header-tag" id="logoutBtn" onclick="doLogout()" style="display:none;cursor:pointer;border:none;color:white;background:rgba(255,255,255,0.2);padding:4px 12px;border-radius:20px;font-size:12px;font-weight:500;">登出</button>
     <span class="header-tag">智能解析 · 批量导出</span>
   </div>
 </header>
@@ -594,10 +781,18 @@
           </div>
         </div>
 
-        <div class="btn-group" style="justify-content:center;margin-top:20px">
+        <div class="btn-group" style="justify-content:center;margin-top:20px;gap:14px">
           <button class="btn btn-primary" onclick="parseAll()" id="parseBtn" style="padding:14px 40px;font-size:16px;">
             <span id="parseBtnText">🔍 一键识别全部</span>
           </button>
+          <button class="btn" id="addrBookBtn" onclick="openAddressBook()"
+            style="display:none;padding:14px 40px;font-size:16px;font-weight:600;cursor:pointer;
+                   border:none;border-radius:8px;color:white;white-space:nowrap;
+                   background:linear-gradient(135deg,#6366f1,#8b5cf6);
+                   box-shadow:0 2px 8px rgba(99,102,241,0.35);transition:all 0.2s"
+            onmouseover="this.style.transform='translateY(-1px)';this.style.boxShadow='0 4px 14px rgba(99,102,241,0.5)'"
+            onmouseout="this.style.transform='';this.style.boxShadow='0 2px 8px rgba(99,102,241,0.35)'"
+          >📒 地址簿导入</button>
         </div>
       </div>
     </div>
@@ -721,6 +916,10 @@
               oninput="setQuickCompany(this.value, true)">
           </span>
           <button class="btn btn-ghost btn-sm" onclick="addEmptyRow()">+ 手动添加一行</button>
+          <button id="addrBookBtn2" onclick="openAddressBook()" style="display:none;cursor:pointer;border:none;background:linear-gradient(135deg,#6366f1,#8b5cf6);color:white;padding:6px 14px;border-radius:8px;font-size:13px;font-weight:600;box-shadow:0 3px 10px rgba(99,102,241,0.3);transition:all 0.2s;white-space:nowrap"
+            onmouseover="this.style.transform='translateY(-1px)';this.style.boxShadow='0 5px 16px rgba(99,102,241,0.4)'"
+            onmouseout="this.style.transform='';this.style.boxShadow='0 3px 10px rgba(99,102,241,0.3)'"
+          >📒 地址簿</button>
           <button class="btn btn-outline btn-sm" onclick="goStep(1)">← 重新输入</button>
           <button class="btn btn-primary btn-sm" onclick="goStep(3)">下一步：导出 →</button>
         </div>
@@ -824,11 +1023,172 @@
 
 </main>
 
+<!-- 用户管理弹窗（仅管理员可见） -->
+<div class="modal-overlay" id="adminModal">
+  <div class="modal-box">
+    <div class="modal-header">
+      <div class="modal-title">👥 用户管理</div>
+      <button class="modal-close" onclick="closeUserManager()">✕</button>
+    </div>
+    <div class="modal-body">
+      <!-- 用户列表 -->
+      <div id="userListArea">
+        <p style="text-align:center;color:var(--text-muted);padding:20px">加载中...</p>
+      </div>
+      <!-- 新增用户 -->
+      <div class="add-user-form">
+        <div class="form-group">
+          <label class="form-label">新用户名</label>
+          <input type="text" id="newUsername" placeholder="中文/字母/数字/下划线" maxlength="32">
+        </div>
+        <div class="form-group">
+          <label class="form-label">密码</label>
+          <input type="password" id="newPassword" placeholder="至少 4 位" minlength="4">
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="addNewUser()">+ 添加</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 地址簿弹窗 -->
+<div class="modal-overlay" id="addrBookModal">
+  <div class="modal-box addr-modal-box">
+    <div class="modal-header">
+      <div class="modal-title">📒 地址簿</div>
+      <button class="modal-close" onclick="closeAddressBook()">✕</button>
+    </div>
+    <div class="modal-body" style="padding:0">
+      <div class="addr-layout">
+        <!-- 左侧：分组列表 -->
+        <div class="addr-sidebar">
+          <div class="addr-sidebar-header">
+            分组
+            <button onclick="promptAddGroup()" title="新建分组">+</button>
+          </div>
+          <div class="addr-group-list" id="groupList">
+            <div class="addr-empty">加载中...</div>
+          </div>
+        </div>
+        <!-- 右侧：地址列表 -->
+        <div class="addr-content">
+          <div class="addr-content-header" id="addrContentHeader">
+            <span id="currentGroupName">请选择分组</span>
+            <button class="btn btn-primary btn-sm" onclick="showAddAddrForm()" id="addAddrBtn" style="display:none">+ 添加地址</button>
+          </div>
+          <!-- 新增/编辑地址表单 -->
+          <div id="addrEditForm" class="addr-edit-form" style="display:none">
+            <div class="form-row">
+              <input type="text" id="addrFormName" placeholder="收件人 *" style="flex:1">
+              <input type="text" id="addrFormPhone" placeholder="电话 *" style="flex:1">
+            </div>
+            <div class="form-row">
+              <input type="text" id="addrFormAddr" placeholder="详细地址 *" style="flex:2">
+            </div>
+            <div class="form-row">
+              <input type="text" id="addrFormProduct" placeholder="商品（可选）" style="flex:1">
+              <input type="text" id="addrFormQty" placeholder="数量" value="1" style="max-width:80px">
+            </div>
+            <div class="form-actions">
+              <input type="hidden" id="addrFormEditId" value="">
+              <button class="btn btn-ghost btn-sm" onclick="cancelAddrForm()">取消</button>
+              <button class="btn btn-primary btn-sm" onclick="submitAddrForm()">保存</button>
+            </div>
+          </div>
+          <!-- 地址列表 -->
+          <div class="addr-list" id="addrList">
+            <div class="addr-empty">请在左侧选择一个分组</div>
+          </div>
+          <!-- 底部操作栏 -->
+          <div class="addr-footer" id="addrFooter" style="display:none">
+            <span class="selected-count">已选 <b id="selectedAddrCount">0</b> 条</span>
+            <button class="btn btn-primary btn-sm" onclick="importSelectedAddresses()">📥 导入已选到订单</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Notification -->
 <div class="notif" id="notif"></div>
 
 <script>
-// ======================== State ========================
+// ======================== 登录状态检查 ========================
+(async function checkLogin() {
+  try {
+    const r = await fetch('/api/business_types');
+    if (r.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+    // 已登录，显示用户信息
+    const me = await fetch('/api/me').then(r=>r.json()).catch(()=>({}));
+    if (me.username) {
+      document.getElementById('usernameDisplay').textContent = me.username;
+      document.getElementById('userTag').style.display = 'inline';
+      document.getElementById('logoutBtn').style.display = 'inline';
+      document.getElementById('addrBookBtn').style.display = 'inline-flex';
+      document.getElementById('addrBookBtn2').style.display = 'inline-block';
+      if (me.is_admin) {
+        document.getElementById('adminBtn').style.display = 'inline';
+      }
+    }
+  } catch(e) {
+    // 网络错误不影响，继续加载
+  }
+  // 登录态正常，加载未导出订单
+  loadSavedOrders();
+})();
+
+async function loadSavedOrders() {
+  try {
+    const r = await fetch('/api/orders/load');
+    const d = await r.json();
+    if (d.success && d.orders.length > 0) {
+      orders = d.orders;
+      renderOrderTable();
+      showNotif(`🔄 已恢复 ${orders.length} 条未导出订单`, 'success');
+    }
+  } catch(e) {}
+}
+
+async function saveOrdersToBackend(batchId) {
+  if (orders.length === 0) return;
+  try {
+    const r = await fetch('/api/orders/save', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({orders: orders, batch_id: batchId || ''})
+    });
+    const d = await r.json();
+    if (d.success) showNotif(`💾 已保存 ${d.saved} 条订单到云端`, 'success');
+  } catch(e) {
+    showNotif('保存失败，请检查网络连接', 'error');
+  }
+}
+
+async function clearOrdersOnBackend(batchId) {
+  try {
+    await fetch('/api/orders/clear', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({batch_id: batchId || ''})
+    });
+  } catch(e) {}
+}
+
+async function deleteOrderFromBackend(dbId) {
+  try {
+    await fetch('/api/orders/delete', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id: dbId})
+    });
+  } catch(e) {}
+}
+
+// ======================= State ========================
 let orders = [];           // 解析到的订单列表
 let defaults = {};         // 默认规则
 let businessTypes = [];
@@ -1102,6 +1462,8 @@ async function parseAll() {
 
       renderOrderTable();
       refreshAccumBadge();
+      // 立即保存到后端（多电脑数据同步）
+      await saveOrdersToBackend();
       goStep(2);
       if (multiFileMode) { toggleMultiMode(); }
     } else {
@@ -1264,7 +1626,10 @@ function renderTbody() {
         onchange="updateOrderField(${idx},'${f.key}',this.value)" 
         style="min-width:${f.width}px;width:100%"></td>`;
     });
-    html += `<td><button class="btn-delete-row" onclick="deleteOrder(${idx})" title="删除此条">✕</button></td>`;
+    html += `<td style="display:flex;gap:4px;justify-content:center">
+      <button class="btn-copy-row" onclick="copyOrder(${idx})" title="复制此条">📋</button>
+      <button class="btn-delete-row" onclick="deleteOrder(${idx})" title="删除此条">✕</button>
+    </td>`;
     html += '</tr>';
   });
   tbody.innerHTML = html;
@@ -1278,13 +1643,32 @@ function updateOrderField(idx, field, value) {
 }
 
 function deleteOrder(idx) {
+  const o = orders[idx];
   orders.splice(idx, 1);
   renderOrderTable();
+  // 同步删除后端对应记录（有 _db_id 说明来自 DB）
+  if (o && o._db_id) {
+    deleteOrderFromBackend(o._db_id);
+  }
+  // 重新保存最新状态到后端（全量覆盖）
+  saveOrdersToBackend();
+}
+
+function copyOrder(idx) {
+  if (!confirm('⚠️ 确认复制当前订单？\n\n复制后将在下一行新增一条完全相同的订单信息。\n点击「确定」继续复制，点击「取消」放弃。')) return;
+  const original = orders[idx];
+  if (!original) return;
+  const copy = JSON.parse(JSON.stringify(original));
+  orders.splice(idx + 1, 0, copy);
+  renderOrderTable();
+  saveOrdersToBackend();
+  showNotif('✅ 已复制订单 #' + (idx + 1), 'success');
 }
 
 function addEmptyRow() {
   orders.push({});
   renderOrderTable();
+  saveOrdersToBackend();
 }
 
 function updateStatus() {
@@ -1634,6 +2018,11 @@ async function exportExcel() {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
       showNotif('✅ 导出成功！', 'success');
+      // 清除后端已导出订单（多电脑同步）
+      await clearOrdersOnBackend();
+      orders = [];
+      refreshAccumBadge();
+      renderOrderTable();
       // 自动保存统计到后端
       saveStatsToBackend().then(() => renderStats());
     } else {
@@ -1716,6 +2105,463 @@ function showNotif(msg, type='info') {
   el.className = `notif notif-${type} show`;
   el.textContent = msg;
   setTimeout(() => el.classList.remove('show'), 3000);
+}
+
+// ======================== 用户管理（仅管理员） ========================
+let userListCache = [];
+
+async function openUserManager() {
+  document.getElementById('adminModal').classList.add('show');
+  await loadUserList();
+}
+
+function closeUserManager() {
+  document.getElementById('adminModal').classList.remove('show');
+}
+
+async function loadUserList() {
+  const area = document.getElementById('userListArea');
+  area.innerHTML = '<p style="text-align:center;color:var(--text-muted);padding:20px">加载中...</p>';
+  try {
+    const r = await fetch('/api/users/list');
+    if (r.status === 401) { window.location.href = '/login'; return; }
+    if (r.status === 403) { closeUserManager(); showNotif('需要管理员权限', 'error'); return; }
+    const d = await r.json();
+    if (d.success) {
+      userListCache = d.users;
+      renderUserTable(d.users);
+    } else {
+      area.innerHTML = `<p style="text-align:center;color:var(--text-muted);padding:20px">加载失败: ${escHtml(d.error)}</p>`;
+    }
+  } catch(e) {
+    area.innerHTML = '<p style="text-align:center;color:var(--text-muted);padding:20px">网络错误，请重试</p>';
+  }
+}
+
+function renderUserTable(users) {
+  const area = document.getElementById('userListArea');
+  if (!users.length) {
+    area.innerHTML = '<p style="text-align:center;color:var(--text-muted);padding:20px">暂无用户</p>';
+    return;
+  }
+  let html = '<table class="user-list-table"><thead><tr>';
+  html += '<th>ID</th><th>用户名</th><th>角色</th><th>创建时间</th><th style="text-align:center">操作</th>';
+  html += '</tr></thead><tbody>';
+  users.forEach(u => {
+    html += '<tr>';
+    html += `<td style="color:var(--text-muted)">${u.id}</td>`;
+    html += `<td style="font-weight:600">${escHtml(u.username)}</td>`;
+    html += `<td>${u.is_admin ? '<span class="admin-badge">管理员</span>' : '<span style="color:var(--text-muted)">普通用户</span>'}</td>`;
+    html += `<td style="color:var(--text-muted);font-size:12px">${u.created_at || '-'}</td>`;
+    if (!u.is_admin) {
+      html += `<td style="text-align:center"><button class="btn btn-ghost btn-sm" onclick="deleteUser(${u.id},'${escHtml(u.username)}')" style="color:#ef4444">🗑 删除</button></td>`;
+    } else {
+      html += '<td style="text-align:center;color:var(--text-muted);font-size:12px">—</td>';
+    }
+    html += '</tr>';
+  });
+  html += '</tbody></table>';
+  area.innerHTML = html;
+}
+
+async function addNewUser() {
+  const username = document.getElementById('newUsername').value.trim();
+  const password = document.getElementById('newPassword').value;
+  
+  if (!username || !password) { showNotif('请填写用户名和密码', 'error'); return; }
+  if (password.length < 4) { showNotif('密码不能少于 4 位', 'error'); return; }
+  
+  try {
+    const r = await fetch('/api/users/add', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username, password})
+    });
+    const d = await r.json();
+    if (d.success) {
+      showNotif(`✅ 用户 "${d.username}" 添加成功`, 'success');
+      document.getElementById('newUsername').value = '';
+      document.getElementById('newPassword').value = '';
+      await loadUserList();
+    } else {
+      showNotif(d.error || '添加失败', 'error');
+    }
+  } catch(e) {
+    showNotif('网络错误，请重试', 'error');
+  }
+}
+
+async function deleteUser(id, username) {
+  if (!confirm(`确定要删除用户 "${username}" 吗？\n\n该用户的所有订单数据也将被清空。`)) return;
+  
+  try {
+    const r = await fetch('/api/users/delete', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id})
+    });
+    const d = await r.json();
+    if (d.success) {
+      showNotif(`✅ 已删除用户 "${d.deleted}"`, 'success');
+      await loadUserList();
+    } else {
+      showNotif(d.error || '删除失败', 'error');
+    }
+  } catch(e) {
+    showNotif('网络错误，请重试', 'error');
+  }
+}
+
+// ======================== 地址簿 ========================
+let addrGroups = [];
+let addrCurrentGroup = null;
+let addrList = [];
+let addrSelected = new Set();  // 选中的地址 ID 集合
+let addrEditId = null;
+
+async function openAddressBook() {
+  document.getElementById('addrBookModal').classList.add('show');
+  addrCurrentGroup = null;
+  addrSelected.clear();
+  await loadGroups();
+}
+
+function closeAddressBook() {
+  document.getElementById('addrBookModal').classList.remove('show');
+  cancelAddrForm();
+}
+
+// ---- 分组管理 ----
+async function loadGroups() {
+  try {
+    const r = await fetch('/api/address/groups');
+    const d = await r.json();
+    if (d.success) {
+      addrGroups = d.groups;
+      renderGroupList();
+      // 如果有分组，默认选中第一个
+      if (addrGroups.length > 0 && !addrCurrentGroup) {
+        selectGroup(addrGroups[0].id, addrGroups[0].name);
+      }
+    }
+  } catch(e) {
+    document.getElementById('groupList').innerHTML = '<div class="addr-empty">加载失败</div>';
+  }
+}
+
+function renderGroupList() {
+  const el = document.getElementById('groupList');
+  if (!addrGroups.length) {
+    el.innerHTML = '<div class="addr-empty" style="padding:20px;font-size:12px">暂无分组<br><button class="btn btn-primary btn-sm" style="margin-top:8px" onclick="promptAddGroup()">+ 新建</button></div>';
+    return;
+  }
+  el.innerHTML = addrGroups.map(g => `
+    <div class="addr-group-item${addrCurrentGroup === g.id ? ' active' : ''}" onclick="selectGroup(${g.id},'${escHtml(g.name)}')">
+      <span>📁 ${escHtml(g.name)}</span>
+      <span class="group-actions" onclick="event.stopPropagation()">
+        <button class="group-act-btn" onclick="promptRenameGroup(${g.id},'${escHtml(g.name)}')" title="重命名">✏️</button>
+        <button class="group-act-btn del" onclick="confirmDeleteGroup(${g.id},'${escHtml(g.name)}')" title="删除">🗑</button>
+      </span>
+    </div>
+  `).join('');
+}
+
+function promptAddGroup() {
+  const name = prompt('请输入新分组名称（最多20个字符）：');
+  if (!name || !name.trim()) return;
+  if (name.trim().length > 20) { showNotif('分组名称不能超过20个字符', 'error'); return; }
+  addGroup(name.trim());
+}
+
+async function addGroup(name) {
+  try {
+    const r = await fetch('/api/address/groups', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name})
+    });
+    const d = await r.json();
+    if (d.success) {
+      showNotif(`✅ 分组 "${d.name}" 已创建`, 'success');
+      await loadGroups();
+      selectGroup(d.id, d.name);
+    } else {
+      showNotif(d.error || '创建失败', 'error');
+    }
+  } catch(e) { showNotif('网络错误', 'error'); }
+}
+
+function promptRenameGroup(id, oldName) {
+  const name = prompt(`重命名分组 "${oldName}"：`, oldName);
+  if (!name || !name.trim() || name.trim() === oldName) return;
+  if (name.trim().length > 20) { showNotif('分组名称不能超过20个字符', 'error'); return; }
+  renameGroup(id, name.trim());
+}
+
+async function renameGroup(id, name) {
+  try {
+    const r = await fetch(`/api/address/groups/${id}`, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name})
+    });
+    const d = await r.json();
+    if (d.success) {
+      await loadGroups();
+      if (addrCurrentGroup === id) {
+        document.getElementById('currentGroupName').textContent = name;
+      }
+    } else {
+      showNotif(d.error || '重命名失败', 'error');
+    }
+  } catch(e) { showNotif('网络错误', 'error'); }
+}
+
+function confirmDeleteGroup(id, name) {
+  if (!confirm(`确定删除分组 "${name}" 及其下所有地址吗？\n\n此操作不可恢复。`)) return;
+  deleteGroup(id, name);
+}
+
+async function deleteGroup(id, name) {
+  try {
+    const r = await fetch(`/api/address/groups/${id}`, { method: 'DELETE' });
+    const d = await r.json();
+    if (d.success) {
+      showNotif(`✅ 已删除分组 "${name}"`, 'success');
+      if (addrCurrentGroup === id) {
+        addrCurrentGroup = null;
+        addrList = [];
+        addrSelected.clear();
+        renderAddrList();
+        updateAddrFooter();
+      }
+      await loadGroups();
+      // 选中第一个剩余分组
+      if (addrGroups.length > 0 && !addrCurrentGroup) {
+        selectGroup(addrGroups[0].id, addrGroups[0].name);
+      }
+    }
+  } catch(e) { showNotif('网络错误', 'error'); }
+}
+
+// ---- 分组选择 ----
+async function selectGroup(id, name) {
+  addrCurrentGroup = id;
+  document.getElementById('currentGroupName').textContent = name;
+  document.getElementById('addAddrBtn').style.display = 'inline-block';
+  addrSelected.clear();
+  cancelAddrForm();
+  renderGroupList();
+  await loadAddresses(id);
+}
+
+// ---- 地址列表 ----
+async function loadAddresses(groupId) {
+  try {
+    const r = await fetch(`/api/address/list?group_id=${groupId}`);
+    const d = await r.json();
+    if (d.success) {
+      addrList = d.addresses;
+      renderAddrList();
+      updateAddrFooter();
+    }
+  } catch(e) {
+    document.getElementById('addrList').innerHTML = '<div class="addr-empty">加载失败</div>';
+  }
+}
+
+function renderAddrList() {
+  const el = document.getElementById('addrList');
+  if (!addrCurrentGroup) {
+    el.innerHTML = '<div class="addr-empty">请在左侧选择一个分组</div>';
+    return;
+  }
+  if (!addrList.length) {
+    el.innerHTML = '<div class="addr-empty">该分组暂无地址，点击「+ 添加地址」新增</div>';
+    return;
+  }
+  el.innerHTML = addrList.map(a => {
+    const sel = addrSelected.has(a.id);
+    return `
+    <div class="addr-item${sel ? ' selected' : ''}" onclick="toggleAddrSelect(${a.id}, event)">
+      <input type="checkbox" ${sel ? 'checked' : ''} onclick="event.stopPropagation(); toggleAddrSelect(${a.id}, event)">
+      <div class="addr-item-info">
+        <div class="addr-item-name">${escHtml(a.name)} <span style="font-weight:400;font-size:12px;color:var(--text-muted)">${escHtml(a.phone)}</span></div>
+        <div class="addr-item-detail">
+          <span>📍 ${escHtml(a.address)}</span>
+          ${a.product ? `<span>📦 ${escHtml(a.product)} ×${escHtml(a.quantity)}</span>` : ''}
+        </div>
+      </div>
+      <div class="addr-item-actions" onclick="event.stopPropagation()">
+        <button onclick="editAddress(${a.id})" title="编辑">✏️</button>
+        <button class="del-addr" onclick="confirmDeleteAddr(${a.id},'${escHtml(a.name)}')" title="删除">🗑</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function toggleAddrSelect(id, event) {
+  if (addrSelected.has(id)) {
+    addrSelected.delete(id);
+  } else {
+    addrSelected.add(id);
+  }
+  // 更新 checkbox 状态和行样式
+  const cb = event?.target?.tagName === 'INPUT' ? event.target : null;
+  if (cb) cb.checked = addrSelected.has(id);
+  renderAddrList();
+  updateAddrFooter();
+}
+
+function updateAddrFooter() {
+  document.getElementById('addrFooter').style.display = addrList.length > 0 ? 'flex' : 'none';
+  document.getElementById('selectedAddrCount').textContent = addrSelected.size;
+}
+
+// ---- 地址表单 ----
+function showAddAddrForm() {
+  if (!addrCurrentGroup) { showNotif('请先选择分组', 'error'); return; }
+  addrEditId = null;
+  document.getElementById('addrFormEditId').value = '';
+  document.getElementById('addrFormName').value = '';
+  document.getElementById('addrFormPhone').value = '';
+  document.getElementById('addrFormAddr').value = '';
+  document.getElementById('addrFormProduct').value = '';
+  document.getElementById('addrFormQty').value = '1';
+  document.getElementById('addrEditForm').style.display = 'block';
+}
+
+function editAddress(id) {
+  const a = addrList.find(x => x.id === id);
+  if (!a) return;
+  addrEditId = id;
+  document.getElementById('addrFormEditId').value = id;
+  document.getElementById('addrFormName').value = a.name || '';
+  document.getElementById('addrFormPhone').value = a.phone || '';
+  document.getElementById('addrFormAddr').value = a.address || '';
+  document.getElementById('addrFormProduct').value = a.product || '';
+  document.getElementById('addrFormQty').value = a.quantity || '1';
+  document.getElementById('addrEditForm').style.display = 'block';
+}
+
+function cancelAddrForm() {
+  addrEditId = null;
+  document.getElementById('addrEditForm').style.display = 'none';
+  document.getElementById('addrFormName').value = '';
+  document.getElementById('addrFormPhone').value = '';
+  document.getElementById('addrFormAddr').value = '';
+  document.getElementById('addrFormProduct').value = '';
+  document.getElementById('addrFormQty').value = '1';
+  document.getElementById('addrFormEditId').value = '';
+}
+
+async function submitAddrForm() {
+  const name = document.getElementById('addrFormName').value.trim();
+  const phone = document.getElementById('addrFormPhone').value.trim();
+  const address = document.getElementById('addrFormAddr').value.trim();
+  const product = document.getElementById('addrFormProduct').value.trim();
+  const quantity = document.getElementById('addrFormQty').value.trim() || '1';
+
+  if (!name || !phone || !address) {
+    showNotif('收件人、电话、地址不能为空', 'error'); return;
+  }
+
+  const editId = document.getElementById('addrFormEditId').value;
+
+  try {
+    let r;
+    if (editId) {
+      r = await fetch(`/api/address/${editId}`, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name, phone, address, product, quantity})
+      });
+    } else {
+      r = await fetch('/api/address/add', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({group_id: addrCurrentGroup, name, phone, address, product, quantity})
+      });
+    }
+    const d = await r.json();
+    if (d.success) {
+      showNotif(editId ? '✅ 地址已更新' : '✅ 地址已添加', 'success');
+      cancelAddrForm();
+      await loadAddresses(addrCurrentGroup);
+    } else {
+      showNotif(d.error || '保存失败', 'error');
+    }
+  } catch(e) { showNotif('网络错误', 'error'); }
+}
+
+function confirmDeleteAddr(id, name) {
+  if (!confirm(`确定删除地址 "${name}" 吗？`)) return;
+  deleteAddress(id);
+}
+
+async function deleteAddress(id) {
+  try {
+    const r = await fetch(`/api/address/${id}`, { method: 'DELETE' });
+    const d = await r.json();
+    if (d.success) {
+      addrSelected.delete(id);
+      await loadAddresses(addrCurrentGroup);
+    }
+  } catch(e) { showNotif('网络错误', 'error'); }
+}
+
+// ---- 批量导入到订单 ----
+async function importSelectedAddresses() {
+  if (addrSelected.size === 0) {
+    showNotif('请至少选择一条地址', 'error'); return;
+  }
+
+  // 收集选中的地址
+  const selected = addrList.filter(a => addrSelected.has(a.id));
+  if (selected.length === 0) return;
+
+  // 重复检测：选中的地址中是否有相同收件人+电话的
+  const seen = {};
+  const dupNames = [];
+  selected.forEach(a => {
+    const key = `${a.name}||${a.phone}`;
+    if (seen[key]) {
+      dupNames.push(a.name);
+    } else {
+      seen[key] = true;
+    }
+  });
+
+  // 如果选中 2 条及以上且有重复，弹窗确认
+  if (selected.length >= 2 && dupNames.length > 0) {
+    const uniqueDups = [...new Set(dupNames)];
+    if (!confirm(`⚠️ 检测到重复的收件人：\n${uniqueDups.join('、')}\n\n（相同收件人+电话出现多次）\n\n确定继续导入吗？`)) {
+      return;
+    }
+  }
+
+  // 将地址转为订单格式，加入 orders
+  const newOrders = selected.map(a => ({
+    '收件人': a.name,
+    '收件电话': a.phone,
+    '收件详细地址': a.address,
+    '托寄物内容1': a.product || '',
+    '托寄物数量1': a.quantity || '1',
+  }));
+
+  orders = orders.concat(newOrders);
+  addrSelected.clear();
+  renderOrderTable();
+  refreshAccumBadge();
+  await saveOrdersToBackend();
+  closeAddressBook();
+  goStep(2);
+  showNotif(`✅ 已导入 ${newOrders.length} 条地址到订单列表`, 'success');
+}
+
+function doLogout() {
+  if (!confirm('确定要登出吗？')) return;
+  fetch('/logout').then(() => { window.location.href = '/login'; });
 }
 </script>
 </body>
