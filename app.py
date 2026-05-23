@@ -1812,7 +1812,7 @@ def _cleanup_old_stats():
 @app.route('/api/stats/save', methods=['POST'])
 @login_required
 def save_stats():
-    """保存当天导出统计（覆盖写入：同一天多次导出只保留最后一次）"""
+    """保存当天导出统计（前端已做累加合并，后端直接写入）"""
     try:
         data = request.json
         stats = data.get('stats', {})

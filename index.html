@@ -1858,9 +1858,10 @@ function renderStatsTable(data) {
 }
 
 async function saveStatsToBackend() {
-  // 收集当前订单统计数据，发送到后端保存
+  // 收集当前订单统计数据，累积到当天统计中（叠加而非覆盖）
   if (!orders.length) return;
   
+  // 1. 计算当前导出的统计
   const d = JSON.parse(localStorage.getItem('sf_defaults') || '{}');
   const map = {};
   orders.forEach(o => {
@@ -1873,9 +1874,36 @@ async function saveStatsToBackend() {
     map[company][product].count += 1;
   });
   
+  const current = buildStatsPayload(map, orders.length);
+  
+  // 2. 获取后端已有的当天统计（用于叠加）
+  let existing = { orders_count: 0, stats: [], totalQty: 0, totalCount: 0 };
+  try {
+    const res = await fetch('/api/stats/today');
+    const j = await res.json();
+    if (j.data && j.data.orders_count > 0) {
+      existing = j.data;
+    }
+  } catch(e) { /* 首次导出无需叠加 */ }
+  
+  // 3. 合并：当天多次导出的统计相加
+  const merged = mergeStats(existing, current);
+  
+  try {
+    await fetch('/api/stats/save', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ stats: merged })
+    });
+  } catch(e) {
+    console.warn('保存统计失败:', e);
+  }
+}
+
+/** 将 map 结构转为 stats payload */
+function buildStatsPayload(map, ordersCount) {
   const companies = Object.keys(map).sort((a, b) => a.localeCompare(b, 'zh'));
   let totalQty = 0, totalCount = 0;
-  
   const stats = companies.map(company => {
     const products = Object.keys(map[company]).sort((a, b) => a.localeCompare(b, 'zh'));
     let companyQty = 0, companyCount = 0;
@@ -1888,18 +1916,27 @@ async function saveStatsToBackend() {
     totalCount += companyCount;
     return { company, products: productList, companyQty, companyCount };
   });
-  
-  try {
-    await fetch('/api/stats/save', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        stats: { orders_count: orders.length, stats, totalQty, totalCount }
-      })
+  return { orders_count: ordersCount, stats, totalQty, totalCount };
+}
+
+/** 叠加合并已有的统计和当次统计 */
+function mergeStats(existing, current) {
+  // 按 公司→商品 建立合并 map
+  const mergedMap = {};
+  const loadInto = (src) => {
+    (src.stats || []).forEach(c => {
+      if (!mergedMap[c.company]) mergedMap[c.company] = {};
+      (c.products || []).forEach(p => {
+        if (!mergedMap[c.company][p.name]) mergedMap[c.company][p.name] = { qty: 0, count: 0 };
+        mergedMap[c.company][p.name].qty += p.qty;
+        mergedMap[c.company][p.name].count += p.count;
+      });
     });
-  } catch(e) {
-    console.warn('保存统计失败:', e);
-  }
+  };
+  loadInto(existing);
+  loadInto(current);
+  return buildStatsPayload(mergedMap,
+    (existing.orders_count || 0) + (current.orders_count || 0));
 }
 
 function getSortedOrders() {
@@ -2020,11 +2057,14 @@ async function exportExcel() {
       showNotif('✅ 导出成功！', 'success');
       // 清除后端已导出订单（多电脑同步）
       await clearOrdersOnBackend();
+      // 先保存统计（此时 orders 仍有数据，叠加到看板）
+      await saveStatsToBackend();
+      // 再清空本地订单
       orders = [];
       refreshAccumBadge();
       renderOrderTable();
-      // 自动保存统计到后端
-      saveStatsToBackend().then(() => renderStats());
+      // 刷新统计看板
+      renderStats();
     } else {
       const err = await res.json();
       showNotif(err.error || '导出失败', 'error');
