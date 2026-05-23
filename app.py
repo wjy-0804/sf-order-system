@@ -516,10 +516,27 @@ def _strip_receiver_label(block):
     return block
 
 
+def _normalize_phone_spaces(text):
+    """规范化手机号内部空格：'189 2913 2348' → '18929132348'
+
+    只处理明显的手机号格式（1[3-9]开头+数字/空格混合），不影响其他文本。
+    """
+    def _fix_phone(m):
+        raw = m.group(0)
+        digits = re.sub(r'\s+', '', raw)
+        if len(digits) == 11:
+            return digits
+        return raw
+    # 匹配1[3-9]开头、后续为数字和空格混合的11位左右片段
+    return re.sub(r'1[3-9][\d\s]{8,12}', _fix_phone, text)
+
+
 def _dispatch_and_parse(block):
     """判断block格式类型，分发给对应解析器"""
     # 预处理：剥离「收货人信息:」等标签前缀（不影响其他格式）
     block = _strip_receiver_label(block)
+    # 预处理：规范化手机号内空格（"189 2913 2348" → "18929132348"）
+    block = _normalize_phone_spaces(block)
     fmt = _classify_block_format(block)
 
     if fmt == 'structured':
@@ -530,6 +547,8 @@ def _dispatch_and_parse(block):
         order = _parse_name_phone_addr(block)
     elif fmt == 'addr_name_phone':
         order = _parse_addr_name_phone(block)
+    elif fmt == 'contact_phone':
+        order = _parse_contact_phone(block)
     else:
         order = _parse_fallback(block)
 
@@ -572,6 +591,12 @@ def _classify_block_format(block):
     # --- 类型B："地址："前缀 ---
     if re.match(r'^\s*(?:地址|收件地址|收货地址|送货地址|详细地址)[：:\s]', first_line):
         return 'addr_prefix'
+
+    # --- 新增：联系电话前缀格式 ---
+    # 格式：地址 + 联系电话：phone + 姓名 + 商品
+    # 例："广东省 东莞市 寮步镇...   联系电话：18929132348   李生 蔬菜包6斤"
+    if re.search(r'(?:联系电话|联系方式|收件电话|收货电话)[：:\s]+\d', first_line):
+        return 'contact_phone'
 
     # === 最后检测 "地址在前" 的格式（Type D）===
     # --- 类型D："地址 姓名 电话" ---
@@ -956,6 +981,84 @@ def _parse_addr_name_phone(block):
 
 
 # ========================================================================
+# 格式F: 联系电话前缀 (新增)
+# ========================================================================
+
+def _parse_contact_phone(block):
+    """解析「地址 + 联系电话：phone + 姓名 + 商品」格式
+
+    典型输入：
+      "广东省 东莞市 寮步镇泰和路9号寮盈慧谷 4B栋402室   联系电话：18929132348   李生 蔬菜包6斤"
+      "广州市天河区xx路xx号  联系电话： 13800138000  张三 有机玉米5斤"
+
+    拆分策略：按「联系电话：」等前缀切分为地址段和剩余段，再从剩余段提取电话+姓名+商品。
+    """
+    order = {}
+    exclude_kw = _get_address_exclude_kw()
+
+    # 1. 找到联系电话前缀的位置
+    contact_m = re.search(
+        r'\s{2,}(?:联系电话|联系方式|收件电话|收货电话)\s*[：:]\s*',
+        block
+    )
+    if not contact_m:
+        return {}
+
+    addr_part = block[:contact_m.start()].strip()
+    after_label = block[contact_m.end():].strip()
+
+    # 2. 从 after_label 中提取电话（开头的连续数字）
+    phone_m = re.match(r'(\d{11})', after_label)
+    if not phone_m:
+        # 电话可能不在最开头，用宽松匹配
+        phone_m2 = re.search(r'(1[3-9]\d{9})', after_label)
+        if phone_m2:
+            order['收件电话'] = phone_m2.group(1)
+            after_phone_start = after_label[:phone_m2.start()].strip()
+            after_phone_end = after_label[phone_m2.end():].strip()
+            # 电话前的内容可能是空或额外信息
+            remaining = (after_phone_start + ' ' + after_phone_end).strip()
+        else:
+            remaining = after_label
+    else:
+        order['收件电话'] = phone_m.group(1)
+        remaining = after_label[phone_m.end():].strip()
+
+    # 3. 设置地址
+    if addr_part:
+        order['收件详细地址'] = _strip_trailing_product(addr_part)
+
+    # 4. 从 remaining 中提取姓名和商品
+    if remaining:
+        # 优先尝试 "姓名 商品" 模式（联系电话格式中姓名在前）
+        m = re.match(r'^([\u4e00-\u9fa5]{2,4})\s+(.{2,50})$', remaining)
+        if m:
+            cand_name = m.group(1)
+            if not any(kw in cand_name for kw in exclude_kw):
+                order['收件人'] = cand_name
+                order['托寄物内容1'] = m.group(2).strip()
+        if not order.get('收件人'):
+            # 也尝试从末尾提取姓名（兜底）
+            name, name_pos = _extract_name_from_end(remaining, exclude_kw)
+            if name:
+                order['收件人'] = name
+                before_name = remaining[:name_pos].strip()
+                if before_name:
+                    order['托寄物内容1'] = before_name
+        if not order.get('收件人'):
+            # 最后手段：直接按空格拆分第一个短词为姓名
+            parts = remaining.split(None, 1)
+            if len(parts[0]) <= 4 and re.match(r'^[\u4e00-\u9fa5]+$', parts[0]):
+                cand = parts[0]
+                if not any(kw in cand for kw in exclude_kw):
+                    order['收件人'] = cand
+                    if len(parts) > 1:
+                        order['托寄物内容1'] = parts[1].strip()
+
+    return order
+
+
+# ========================================================================
 # 格式E: 兜底
 # ========================================================================
 
@@ -982,7 +1085,7 @@ def _parse_fallback(block):
             order['收件电话'] = phones[0]
     if not order.get('收件详细地址'):
         addr_match = re.search(
-            r'[^\s，,。；;\d]{2,5}?(?:省|自治区|市)[^\s，,。；;\d]{1,10}?(?:市|州|区|县)[^\n，,。；;]{5,60}',
+            r'[^\s，,。；;\d]{2,5}?(?:省|自治区|市)\s*[^\s，,。；;\d]{0,10}?(?:市|州|区|县)[^\n，,。；;]{5,60}',
             block
         )
         if addr_match:
@@ -1118,7 +1221,8 @@ def _extract_name_smart(order, block):
         '单元','室','层','栋','大厦','广场','花园',
         '收件','寄件','地址','商品','货物','手机','电话','公司',
         '单位','订单','备注','数量','工作室','有机','素食','农场',
-        '种植','基地','合作社'
+        '种植','基地','合作社',
+        '联系','收货','送货','详细','寄件人',
     ]
 
     if phone:
