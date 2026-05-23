@@ -786,7 +786,14 @@ def _parse_name_phone_addr(block):
     if m:
         order['收件人'] = m.group(1)
         order['收件电话'] = m.group(2)
-        order['收件详细地址'] = _strip_trailing_product(m.group(3).strip())
+        addr_raw = m.group(3).strip()
+        stripped = _strip_trailing_product(addr_raw)
+        order['收件详细地址'] = stripped
+        # 如果有被剥离的商品部分，保存为商品
+        if len(stripped) < len(addr_raw):
+            product_part = addr_raw[len(stripped):].strip()
+            if product_part:
+                order['托寄物内容1'] = product_part
         return order
 
     # C2: "姓名 电话(粘连/半空格) 地址" — 允许姓名与电话间有0-N个空格
@@ -794,7 +801,14 @@ def _parse_name_phone_addr(block):
     if m:
         order['收件人'] = m.group(1)
         order['收件电话'] = m.group(2)
-        order['收件详细地址'] = _strip_trailing_product(m.group(3).strip())
+        addr_raw = m.group(3).strip()
+        stripped = _strip_trailing_product(addr_raw)
+        order['收件详细地址'] = stripped
+        # 如果有被剥离的商品部分，保存为商品
+        if len(stripped) < len(addr_raw):
+            product_part = addr_raw[len(stripped):].strip()
+            if product_part:
+                order['托寄物内容1'] = product_part
         return order
 
     # C3: 跨行 - 第一行"姓名 电话"，后续行为地址
@@ -1178,6 +1192,8 @@ def _looks_like_product(text):
         r'^[\u4e00-\u9fa5]{2,20}$',
         # 带规格的商品名: "玉米4.5斤"、"有机蔬菜 5斤"
         r'^[\u4e00-\u9fa5a-zA-Z0-9]{1,30}(?:\d+(?:\.\d+)?)?\s*(?:斤|kg|KG|公斤|克|g|件|箱|袋|盒|装)$',
+        # 末尾为数字（无单位）的商品名: "茄子辣椒双拼4.5"、"玉米4.5"
+        r'^[\u4e00-\u9fa5]{2,30}\d+(?:\.\d+)?$',
         # 带括号规格: "新鲜有机甜玉米（10斤装）"
         r'^[\u4e00-\u9fa5a-zA-Z0-9()（）\-·【】\[\]]{2,50}[\(（]',
         # 包/套餐/组合类: "蔬菜包8种加玉米"
