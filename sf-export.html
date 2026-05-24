@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>顺丰导出订单分析 - 六亩园</title>
+<style>
+  :root {
+    --primary: #e5000e;
+    --primary-dark: #b8000b;
+    --primary-light: #ffeaea;
+    --accent: #ff6b35;
+    --bg: #f5f6fa;
+    --card: #ffffff;
+    --border: #e2e5ec;
+    --text: #1a1a2e;
+    --text-muted: #6b7280;
+    --success: #10b981;
+    --warning: #f59e0b;
+    --shadow: 0 2px 12px rgba(0,0,0,0.08);
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+  .header {
+    background: linear-gradient(135deg, var(--primary) 0%, #ff4444 100%);
+    color: white;
+    padding: 0 32px;
+    height: 64px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    box-shadow: 0 2px 16px rgba(229,0,14,0.3);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .header-logo {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+  }
+  .header-logo svg { opacity: 0.95; }
+  .header-tag {
+    background: rgba(255,255,255,0.2);
+    border-radius: 20px;
+    padding: 4px 12px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    border: none;
+    color: white;
+    text-decoration: none;
+    transition: background 0.2s;
+  }
+  .header-tag:hover { background: rgba(255,255,255,0.3); }
+  .main { max-width: 1300px; margin: 0 auto; padding: 28px 24px; }
+  .card {
+    background: var(--card);
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    margin-bottom: 20px;
+  }
+  .card-header {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: #fafbfc;
+  }
+  .card-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .card-title .icon {
+    width: 28px; height: 28px;
+    background: var(--primary-light);
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--primary);
+    font-size: 14px;
+  }
+  .card-body { padding: 20px; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 10px 20px;
+    border-radius: 8px;
+    font-size: 14px; font-weight: 600;
+    cursor: pointer;
+    border: none;
+    transition: all 0.2s;
+    white-space: nowrap;
+  }
+  .btn-primary {
+    background: var(--primary);
+    color: white;
+    box-shadow: 0 2px 8px rgba(229,0,14,0.3);
+  }
+  .btn-primary:hover { background: var(--primary-dark); transform: translateY(-1px); }
+  .btn-ghost { background: var(--bg); color: var(--text-muted); }
+  .btn-ghost:hover { background: var(--border); }
+  .btn-sm { padding: 6px 14px; font-size: 13px; }
+  .drop-zone {
+    border: 2px dashed var(--border);
+    border-radius: 12px;
+    padding: 40px 20px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.25s;
+    background: #fafbfc;
+  }
+  .drop-zone:hover, .drop-zone.dragover {
+    border-color: var(--primary);
+    background: var(--primary-light);
+  }
+  .drop-zone .icon { font-size: 40px; margin-bottom: 10px; }
+  .drop-zone .title { font-size: 16px; font-weight: 600; margin-bottom: 6px; }
+  .drop-zone .hint { font-size: 13px; color: var(--text-muted); }
+  .company-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+    gap: 16px;
+  }
+  .company-card {
+    background: var(--card);
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .company-card-header {
+    padding: 14px 18px;
+    background: linear-gradient(135deg, #fafbfc 0%, #f0f2f5 100%);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .company-name {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .company-count {
+    background: var(--primary);
+    color: white;
+    border-radius: 20px;
+    padding: 2px 10px;
+    font-size: 12px;
+    font-weight: 700;
+  }
+  .company-card-body {
+    padding: 14px 18px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+  }
+  .order-list {
+    flex: 1;
+    max-height: 300px;
+    overflow-y: auto;
+    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+    font-size: 13px;
+    line-height: 1.8;
+    color: var(--text);
+    background: #fafbfc;
+    border-radius: 8px;
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .company-card-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+  }
+  .company-card-actions .btn { flex: 1; justify-content: center; }
+  .summary-bar {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+  }
+  .summary-item {
+    background: var(--card);
+    border-radius: 10px;
+    padding: 12px 20px;
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .summary-item .num {
+    font-size: 22px;
+    font-weight: 800;
+    color: var(--primary);
+  }
+  .summary-item .label {
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+  .notif {
+    position: fixed; top: 76px; right: 24px;
+    padding: 12px 20px;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: 500;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+    z-index: 9999;
+    transform: translateX(120%);
+    transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .notif.show { transform: translateX(0); }
+  .notif-success { background: var(--success); color: white; }
+  .notif-error { background: #ef4444; color: white; }
+  .hidden { display: none !important; }
+  @media (max-width: 768px) {
+    .company-grid { grid-template-columns: 1fr; }
+    .main { padding: 16px; }
+    .header { padding: 0 16px; }
+  }
+</style>
+</head>
+<body>
+
+<header class="header">
+  <div class="header-logo">
+    <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+      <rect width="32" height="32" rx="8" fill="rgba(255,255,255,0.2)"/>
+      <path d="M6 10h20M6 16h14M6 22h17" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+      <circle cx="25" cy="22" r="4" fill="#ff6b35"/>
+    </svg>
+    顺丰导出订单分析
+  </div>
+  <div style="display:flex;gap:10px;align-items:center;">
+    <a href="/" class="header-tag">&larr; 返回录入</a>
+    <span class="header-tag" style="cursor:default;">按公司归类 &middot; 一键导出</span>
+  </div>
+</header>
+
+<main class="main">
+
+  <div class="card" id="uploadCard">
+    <div class="card-header">
+      <div class="card-title">
+        <div class="icon">&#128228;</div>
+        上传顺丰导出表格
+      </div>
+      <span style="font-size:12px;color:var(--text-muted)">支持 .xls / .xlsx 格式</span>
+    </div>
+    <div class="card-body">
+      <div class="drop-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
+        <div class="icon">&#128194;</div>
+        <div class="title">点击或拖拽上传顺丰导出表格</div>
+        <div class="hint">支持 .xls / .xlsx 格式，自动提取运单号、收件人、公司信息</div>
+      </div>
+      <input type="file" id="fileInput" accept=".xls,.xlsx" style="display:none" onchange="handleFile(this.files[0])">
+    </div>
+  </div>
+
+  <div id="resultsSection" class="hidden">
+    <div class="summary-bar">
+      <div class="summary-item">
+        <span class="num" id="totalOrders">0</span>
+        <span class="label">总订单数</span>
+      </div>
+      <div class="summary-item">
+        <span class="num" id="totalCompanies">0</span>
+        <span class="label">公司数</span>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="resetUpload()">&#128260; 重新上传</button>
+    </div>
+    <div class="company-grid" id="companyGrid"></div>
+  </div>
+
+</main>
+
+<div class="notif" id="notif"></div>
+
+<script>
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+const uploadCard = document.getElementById('uploadCard');
+const resultsSection = document.getElementById('resultsSection');
+const companyGrid = document.getElementById('companyGrid');
+let lastData = null;
+
+dropZone.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  dropZone.classList.add('dragover');
+});
+dropZone.addEventListener('dragleave', () => {
+  dropZone.classList.remove('dragover');
+});
+dropZone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dropZone.classList.remove('dragover');
+  const file = e.dataTransfer.files[0];
+  if (file) handleFile(file);
+});
+
+function handleFile(file) {
+  if (!file) return;
+  const fname = file.name.toLowerCase();
+  if (!fname.endsWith('.xls') && !fname.endsWith('.xlsx')) {
+    showNotif('仅支持 .xls 或 .xlsx 格式', 'error');
+    return;
+  }
+  const formData = new FormData();
+  formData.append('file', file);
+  dropZone.innerHTML = '<div class="icon">&#9203;</div><div class="title">正在解析...</div><div class="hint">请稍候</div>';
+  fetch('/api/sf-export/parse', { method: 'POST', body: formData })
+    .then(r => r.json())
+    .then(data => {
+      if (data.success) {
+        lastData = data;
+        renderResults(data);
+        showNotif('成功解析 ' + data.total + ' 条订单，' + data.companies + ' 个公司', 'success');
+      } else {
+        showNotif(data.error || '解析失败', 'error');
+        resetUpload();
+      }
+    })
+    .catch(err => {
+      showNotif('上传失败：' + err.message, 'error');
+      resetUpload();
+    });
+}
+
+function renderResults(data) {
+  document.getElementById('totalOrders').textContent = data.total;
+  document.getElementById('totalCompanies').textContent = data.companies;
+  companyGrid.innerHTML = '';
+  data.groups.forEach(function(group) {
+    const lines = group.orders.map(function(o) { return o.tracking + '\t' + o.contact; }).join('\n');
+    const card = document.createElement('div');
+    card.className = 'company-card';
+    card.innerHTML =
+      '<div class="company-card-header">' +
+        '<div class="company-name">&#127970; ' + escapeHtml(group.company) +
+          '<span class="company-count">' + group.count + '</span></div>' +
+      '</div>' +
+      '<div class="company-card-body">' +
+        '<div class="order-list">' + escapeHtml(lines) + '</div>' +
+        '<div class="company-card-actions">' +
+          '<button class="btn btn-ghost btn-sm" onclick="copyCompany(\'' + escapeJs(group.company) + '\', this)">&#128203; 复制文本</button>' +
+          '<button class="btn btn-primary btn-sm" onclick="downloadCompany(\'' + escapeJs(group.company) + '\')">&#11015; 下载表格</button>' +
+        '</div>' +
+      '</div>';
+    companyGrid.appendChild(card);
+  });
+  uploadCard.classList.add('hidden');
+  resultsSection.classList.remove('hidden');
+}
+
+function copyCompany(company, btn) {
+  const group = lastData && lastData.groups.find(function(g) { return g.company === company; });
+  if (!group) { showNotif('数据未找到', 'error'); return; }
+  const text = group.orders.map(function(o) { return o.tracking + '\t' + o.contact; }).join('\n');
+  navigator.clipboard.writeText(text).then(function() {
+    var orig = btn.innerHTML;
+    btn.innerHTML = '&#9989; 已复制';
+    setTimeout(function() { btn.innerHTML = orig; }, 1500);
+    showNotif(company + ' 文本已复制到剪贴板', 'success');
+  }).catch(function() {
+    showNotif('复制失败，请手动复制', 'error');
+  });
+}
+
+function downloadCompany(company) {
+  const group = lastData && lastData.groups.find(function(g) { return g.company === company; });
+  if (!group) { showNotif('数据未找到', 'error'); return; }
+  fetch('/api/sf-export/download', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ company: group.company, orders: group.orders })
+  })
+  .then(function(r) {
+    if (!r.ok) throw new Error('下载失败');
+    const disp = r.headers.get('content-disposition');
+    const match = disp && disp.match(/filename="?([^"]+)"?/);
+    const filename = match ? match[1] : company + '_运单.xlsx';
+    return r.blob().then(function(blob) { return { blob: blob, filename: filename }; });
+  })
+  .then(function(res) {
+    const url = URL.createObjectURL(res.blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = res.filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showNotif(company + ' 表格已下载', 'success');
+  })
+  .catch(function(err) {
+    showNotif('下载失败：' + err.message, 'error');
+  });
+}
+
+function resetUpload() {
+  uploadCard.classList.remove('hidden');
+  resultsSection.classList.add('hidden');
+  dropZone.innerHTML = '<div class="icon">&#128194;</div><div class="title">点击或拖拽上传顺丰导出表格</div><div class="hint">支持 .xls / .xlsx 格式，自动提取运单号、收件人、公司信息</div>';
+  fileInput.value = '';
+  lastData = null;
+}
+
+function showNotif(msg, type) {
+  const n = document.getElementById('notif');
+  n.textContent = msg;
+  n.className = 'notif notif-' + type + ' show';
+  setTimeout(function() { n.classList.remove('show'); }, 3000);
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+function escapeJs(str) {
+  return str.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"');
+}
+</script>
+
+</body>
+</html>

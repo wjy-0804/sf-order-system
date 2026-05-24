@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, send_file, session, redirect, url_for
 from flask import Response, render_template_string
 import openpyxl
+import xlrd  # 支持读取旧版 .xls 文件
 from openpyxl import load_workbook
 
 app = Flask(__name__, static_folder='.', static_url_path='')
@@ -2204,6 +2205,133 @@ def _parse_excel_file(file_obj):
     os.unlink(tmp_path)
     return all_orders
 
+# ======================== SF 导出订单分析 ========================
+
+def _read_sf_export(file_stream):
+    """读取顺丰导出订单 .xls/.xlsx 文件，提取运单号、收方联系人、收方公司
+
+    参数: file_stream — Flask request.files 对象（file-like，有 save() 方法）
+    返回: {公司名: [{'tracking': 'SF...', 'contact': '姓名'}, ...], ...}
+    """
+    tmp = tempfile.NamedTemporaryFile(suffix='.xls', delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+    file_stream.save(tmp_path)
+
+    try:
+        wb = xlrd.open_workbook(tmp_path)
+        sh = wb.sheet_by_index(0)
+    except Exception as e:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise ValueError(f'无法读取表格文件：{e}')
+
+    COL_TRACKING = 3
+    COL_CONTACT  = 19
+    COL_COMPANY  = 22
+
+    groups = {}
+    for r in range(1, sh.nrows):
+        tracking = str(sh.cell_value(r, COL_TRACKING)).strip()
+        contact  = str(sh.cell_value(r, COL_CONTACT)).strip()
+        company  = str(sh.cell_value(r, COL_COMPANY)).strip()
+
+        if not tracking:
+            continue
+
+        company_key = company if company else '未标注公司'
+        if company_key not in groups:
+            groups[company_key] = []
+        groups[company_key].append({
+            'tracking': tracking,
+            'contact': contact if contact else '(无姓名)',
+        })
+
+    if os.path.exists(tmp_path):
+        os.unlink(tmp_path)
+
+    return groups
+
+
+@app.route('/sf-export')
+def sf_export_page():
+    """SF 导出订单分析页面"""
+    return app.send_static_file('sf-export.html')
+
+
+@app.route('/api/sf-export/parse', methods=['POST'])
+def sf_export_parse():
+    """上传 SF 导出文件，解析后按公司分组返回"""
+    if 'file' not in request.files:
+        return jsonify({'success': False, 'error': '请上传文件'}), 400
+
+    f = request.files['file']
+    if not f or not f.filename:
+        return jsonify({'success': False, 'error': '文件为空'}), 400
+
+    fname = f.filename.lower()
+    if not (fname.endswith('.xls') or fname.endswith('.xlsx')):
+        return jsonify({'success': False, 'error': '仅支持 .xls 或 .xlsx 格式'}), 400
+
+    try:
+        groups = _read_sf_export(f)
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+
+    if not groups:
+        return jsonify({'success': False, 'error': '未能从文件中提取到有效订单'}), 400
+
+    result = []
+    total = 0
+    for company, orders in groups.items():
+        result.append({
+            'company': company,
+            'count': len(orders),
+            'orders': orders,
+        })
+        total += len(orders)
+
+    result.sort(key=lambda x: -x['count'])
+
+    return jsonify({
+        'success': True,
+        'total': total,
+        'companies': len(result),
+        'groups': result,
+    })
+
+
+@app.route('/api/sf-export/download', methods=['POST'])
+def sf_export_download():
+    """按公司下载 Excel — POST JSON: {company, orders}"""
+    data = request.json or {}
+    company = data.get('company', '').strip()
+    orders  = data.get('orders', [])
+
+    if not company:
+        return jsonify({'success': False, 'error': '公司名称不能为空'}), 400
+    if not orders:
+        return jsonify({'success': False, 'error': '无订单数据'}), 400
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = company[:28]
+    ws.append(['运单号', '收件人姓名'])
+
+    for o in orders:
+        ws.append([o.get('tracking', ''), o.get('contact', '')])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    safe_name = company.replace('/', '／').replace('\\', '＼')[:50]
+    return send_file(
+        buf,
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        as_attachment=True,
+        download_name=f'{safe_name}_运单_{datetime.now().strftime("%Y%m%d")}.xlsx'
+    )
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5001))
