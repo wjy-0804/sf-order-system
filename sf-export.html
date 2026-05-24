@@ -286,6 +286,9 @@
 
   <div id="resultsSection" class="hidden">
     <div class="summary-bar">
+      <div class="summary-item" style="max-width:400px;flex:1;">
+        <span style="font-size:13px;color:var(--text-muted);">&#128196; <span id="currentFileName">-</span></span>
+      </div>
       <div class="summary-item">
         <span class="num" id="totalOrders">0</span>
         <span class="label">总订单数</span>
@@ -359,7 +362,7 @@ function handleFile(file) {
 function renderResults(data) {
   document.getElementById('totalOrders').textContent = data.total;
   document.getElementById('totalCompanies').textContent = data.companies;
-  if (lastFile) document.getElementById('currentFileName').textContent = lastFile.name;
+  var fnEl = document.getElementById('currentFileName'); if (fnEl && lastFile) fnEl.textContent = lastFile.name;
   companyGrid.innerHTML = '';
   data.groups.forEach(function(group) {
     const lines = group.orders.map(function(o) { return o.tracking + '\t' + o.contact; }).join('\n');
