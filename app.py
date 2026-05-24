@@ -1056,16 +1056,14 @@ def _parse_phone_name(block):
     if addr_lines:
         order["收件详细地址"] = "".join(addr_lines).strip()
 
-    # 3. 剩余行提取商品+数量
+    # 3. 剩余行提取托寄物内容（商品+规格整体填入，不剥离数量）
     product_text = " ".join(remain_lines).strip() if remain_lines else (lines[-1] if len(lines) > 2 else "")
     if product_text and not order.get("托寄物内容1"):
-        # 从 product_text 末尾提取数量
-        qm = re.search(r"([\d.]+\s*(?:斤|kg|g|个|袋|箱|份))\s*$", product_text)
+        order["托寄物内容1"] = product_text.strip()
+        # 尝试从内容末尾提取数量作为辅助字段（可选）
+        qm = re.search(r"([\d.]+\s*(?:斤|kg|袋|箱|份))\s*$", product_text)
         if qm:
-            order["托寄物内容1"] = product_text[:qm.start()].strip()
             order["托寄物数量1"] = qm.group(1).strip()
-        else:
-            order["托寄物内容1"] = product_text.strip()
 
     return order
 
