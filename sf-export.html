@@ -294,7 +294,8 @@
         <span class="num" id="totalCompanies">0</span>
         <span class="label">公司数</span>
       </div>
-      <button class="btn btn-ghost btn-sm" onclick="resetUpload()">&#128260; 重新上传</button>
+      <button class="btn btn-primary btn-sm" onclick="reparseFile()" id="btnReparse">&#128260; 重新识别</button>
+      <button class="btn btn-ghost btn-sm" onclick="resetUpload()">&#128194; 换文件</button>
     </div>
     <div class="company-grid" id="companyGrid"></div>
   </div>
@@ -310,6 +311,7 @@ const uploadCard = document.getElementById('uploadCard');
 const resultsSection = document.getElementById('resultsSection');
 const companyGrid = document.getElementById('companyGrid');
 let lastData = null;
+let lastFile = null;
 
 dropZone.addEventListener('dragover', (e) => {
   e.preventDefault();
@@ -339,6 +341,7 @@ function handleFile(file) {
     .then(r => r.json())
     .then(data => {
       if (data.success) {
+        lastFile = file;
         lastData = data;
         renderResults(data);
         showNotif('成功解析 ' + data.total + ' 条订单，' + data.companies + ' 个公司', 'success');
@@ -356,6 +359,7 @@ function handleFile(file) {
 function renderResults(data) {
   document.getElementById('totalOrders').textContent = data.total;
   document.getElementById('totalCompanies').textContent = data.companies;
+  if (lastFile) document.getElementById('currentFileName').textContent = lastFile.name;
   companyGrid.innerHTML = '';
   data.groups.forEach(function(group) {
     const lines = group.orders.map(function(o) { return o.tracking + '\t' + o.contact; }).join('\n');
@@ -424,12 +428,25 @@ function downloadCompany(company) {
   });
 }
 
+
+function reparseFile() {
+  if (!lastFile) return;
+  var btn = document.getElementById('btnReparse');
+  btn.disabled = true;
+  btn.innerHTML = '&#9203; 识别中...';
+  handleFile(lastFile);
+  setTimeout(function() { btn.disabled = false; btn.innerHTML = '&#128260; 重新识别'; }, 2000);
+}
+
 function resetUpload() {
   uploadCard.classList.remove('hidden');
   resultsSection.classList.add('hidden');
-  dropZone.innerHTML = '<div class="icon">&#128194;</div><div class="title">点击或拖拽上传顺丰导出表格</div><div class="hint">支持 .xls / .xlsx 格式，自动提取运单号、收件人、公司信息</div>';
+  dropZone.innerHTML = lastFile
+    ? '<div class="icon">&#9989;</div><div class="title">已加载: ' + escapeHtml(lastFile.name) + '</div><div class="hint">点击重新识别或拖拽新文件替换</div>'
+    : '<div class="icon">&#128194;</div><div class="title">点击或拖拽上传顺丰导出表格</div><div class="hint">支持 .xls / .xlsx 格式，自动提取运单号、收件人、公司信息</div>';
   fileInput.value = '';
   lastData = null;
+  lastFile = null;
 }
 
 function showNotif(msg, type) {
