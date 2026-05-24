@@ -1027,7 +1027,7 @@ def _parse_phone_name(block):
 
     # 1. 首行：电话+姓名粘连
     first = lines[0]
-    m = re.match(r"^(1[3-9]\\d{9})([\\u4e00-\\u9fa5]{2,4})$", first)
+    m = re.match(r"^(1[3-9]\d{9})([\u4e00-\u9fa5]{2,4})$", first)
     if not m:
         return {}
     order["收件电话"] = m.group(1)
@@ -1045,7 +1045,7 @@ def _parse_phone_name(block):
             found_addr = True
         elif found_addr:
             # 地址行之后，判断是否含数量单位（商品行特征）
-            if re.search(r"[\\d.]+\\s*(?:斤|kg|g|个|袋|箱|份)", line):
+            if re.search(r"[\d.]+\s*(?:斤|kg|g|个|袋|箱|份)", line):
                 remain_lines.append(line)
                 break
             else:
@@ -1060,7 +1060,7 @@ def _parse_phone_name(block):
     product_text = " ".join(remain_lines).strip() if remain_lines else (lines[-1] if len(lines) > 2 else "")
     if product_text and not order.get("托寄物内容1"):
         # 从 product_text 末尾提取数量
-        qm = re.search(r"([\\d.]+\\s*(?:斤|kg|g|个|袋|箱|份))\\s*$", product_text)
+        qm = re.search(r"([\d.]+\s*(?:斤|kg|g|个|袋|箱|份))\s*$", product_text)
         if qm:
             order["托寄物内容1"] = product_text[:qm.start()].strip()
             order["托寄物数量1"] = qm.group(1).strip()
