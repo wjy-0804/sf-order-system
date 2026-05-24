@@ -1060,10 +1060,7 @@ def _parse_phone_name(block):
     product_text = " ".join(remain_lines).strip() if remain_lines else (lines[-1] if len(lines) > 2 else "")
     if product_text and not order.get("托寄物内容1"):
         order["托寄物内容1"] = product_text.strip()
-        # 尝试从内容末尾提取数量作为辅助字段（可选）
-        qm = re.search(r"([\d.]+\s*(?:斤|kg|袋|箱|份))\s*$", product_text)
-        if qm:
-            order["托寄物数量1"] = qm.group(1).strip()
+        # 注：数量字段不自动填，规格已包含在托寄物内容1中
 
     return order
 
