@@ -548,6 +548,8 @@ def _dispatch_and_parse(block):
         order = _parse_name_phone_addr(block)
     elif fmt == 'addr_name_phone':
         order = _parse_addr_name_phone(block)
+    elif fmt == 'phone_name':
+        order = _parse_phone_name(block)
     elif fmt == 'contact_phone':
         order = _parse_contact_phone(block)
     else:
@@ -592,6 +594,11 @@ def _classify_block_format(block):
     # --- 类型B："地址："前缀 ---
     if re.match(r'^\s*(?:地址|收件地址|收货地址|送货地址|详细地址)[：:\s]', first_line):
         return 'addr_prefix'
+
+    # --- 新增：电话+姓名粘连格式（首行 = 电话+姓名，无分隔）---
+    # 例："13822153541廖琼"  "13800138000张三"
+    if re.match(r'^1[3-9]\d{9}[一-龥]{2,4}$', first_line):
+        return 'phone_name'
 
     # --- 新增：联系电话前缀格式 ---
     # 格式：地址 + 联系电话：phone + 姓名 + 商品
@@ -994,6 +1001,73 @@ def _parse_addr_name_phone(block):
 
     return {}
 
+
+
+# ========================================================================
+# 格式C2: 电话+姓名粘连（首行 = 电话+姓名，无空格）
+# ========================================================================
+
+def _parse_phone_name(block):
+    """解析「电话+姓名粘连 地址 商品」格式
+
+    典型输入：
+      "13822153541廖琼"
+      "广东省广州市南沙区南沙街道时代南湾7栋一单元2402"
+      "羽衣甘蓝2.8斤"
+
+    规则：
+    - 首行：11位电话 + 中文姓名（粘连，无空格）
+    - 第二行起：地址（含省市区街道等关键词）
+    - 最后一行（可选）：商品+数量
+    """
+    order = {}
+    lines = [l.strip() for l in block.split("\n") if l.strip()]
+    if not lines:
+        return {}
+
+    # 1. 首行：电话+姓名粘连
+    first = lines[0]
+    m = re.match(r"^(1[3-9]\\d{9})([\\u4e00-\\u9fa5]{2,4})$", first)
+    if not m:
+        return {}
+    order["收件电话"] = m.group(1)
+    order["收件人"] = m.group(2)
+
+    # 2. 找地址行（含省市区镇街道路号栋单元等关键词）
+    addr_lines = []
+    remain_lines = []
+    found_addr = False
+    addr_kw = r"(?:省|自治区|市|区|县|镇|街道|路|巷|号|栋|单元|楼层|室|房|村|庄|苑|园|广场|大厦)"
+
+    for line in lines[1:]:
+        if not found_addr and re.search(addr_kw, line):
+            addr_lines.append(line)
+            found_addr = True
+        elif found_addr:
+            # 地址行之后，判断是否含数量单位（商品行特征）
+            if re.search(r"[\\d.]+\\s*(?:斤|kg|g|个|袋|箱|份)", line):
+                remain_lines.append(line)
+                break
+            else:
+                addr_lines.append(line)
+        else:
+            remain_lines.append(line)
+
+    if addr_lines:
+        order["收件详细地址"] = "".join(addr_lines).strip()
+
+    # 3. 剩余行提取商品+数量
+    product_text = " ".join(remain_lines).strip() if remain_lines else (lines[-1] if len(lines) > 2 else "")
+    if product_text and not order.get("托寄物内容1"):
+        # 从 product_text 末尾提取数量
+        qm = re.search(r"([\\d.]+\\s*(?:斤|kg|g|个|袋|箱|份))\\s*$", product_text)
+        if qm:
+            order["托寄物内容1"] = product_text[:qm.start()].strip()
+            order["托寄物数量1"] = qm.group(1).strip()
+        else:
+            order["托寄物内容1"] = product_text.strip()
+
+    return order
 
 # ========================================================================
 # 格式F: 联系电话前缀 (新增)
