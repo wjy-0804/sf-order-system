@@ -1324,11 +1324,7 @@ def apply_defaults(orders, defaults):
         for k, v in order.items():
             if v:
                 merged[k] = v
-        # 规则写死：寄件人 ⇄ 收件公司 双向互填
-        if merged.get('寄件人') and not merged.get('收件公司'):
-            merged['收件公司'] = merged['寄件人']
-        elif merged.get('收件公司') and not merged.get('寄件人'):
-            merged['寄件人'] = merged['收件公司']
+        # 寄件人始终使用默认值，收件公司始终使用用户填写值，互不干扰
         result.append(merged)
     return result
 
