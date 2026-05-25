@@ -208,11 +208,13 @@ def parse_table(lines, sep):
     # 别名顺序：精确表头名放最前面（优先score=3精确匹配），通用短别名放后面
     field_aliases = {
         '收件人': [
+            '收货人/提货人姓名',  # 微店导出标准（精确！含/分隔符）
             '收件人姓名',  # 有赞/电商标准
             '收货人姓名', '收件人', '收货人',  # 通用
             '联系人', '姓名', '买家姓名', '客户姓名', 'name', 'receiver', '客户',
         ],
         '收件电话': [
+            '收货人/提货人手机号',  # 微店导出标准（精确！含/分隔符）
             '收货人手机号码', '收件人手机号码', '收货人手机号',  # 电商标准（精确！含"收货人×"前缀）
             '收货人电话',  # 乡伴/有赞等电商导出标准
             '手机号码',
@@ -220,6 +222,7 @@ def parse_table(lines, sep):
             '手机', '电话', 'phone', 'mobile', 'tel', '联系方式',
         ],
         '收件详细地址': [
+            '收货/提货详细地址',  # 微店导出标准（精确！含/分隔符）
             '收货人完整地址', '收件人完整地址', '收货人详细地址',  # 电商标准（含"收货人×"/"收件人×"前缀）
             '收货人地址',  # 乡伴/有赞等电商导出标准
             '收件详细地址', '收货详细地址',
@@ -233,6 +236,7 @@ def parse_table(lines, sep):
             'product', 'goods', 'item', '内容', '货品', '寄件内容',
         ],
         '托寄物数量1': [
+            '商品件数',  # 微店/电商标准（精确！区别于"商品总件数"）
             'SKU数量',  # 电商标准（精确！）
             '托寄物数量1', '数量', '件数', 'qty', 'quantity', '重量', '数',
         ],
@@ -293,13 +297,14 @@ def parse_table(lines, sep):
 
             if best_field:
                 existing = _match_score.get(best_field)
-                # 替换条件：分数更高，或 同分且别名更长（更精确），或 同分同长度则后列优先
+                # 替换条件：分数更高，或 同分且别名更长（更精确）
+                # 同分同长度时保留先匹配到的列（不再被后面的覆盖）
                 should_replace = False
                 if existing is None:
                     should_replace = True
                 elif best_score > existing[1]:
                     should_replace = True
-                elif best_score == existing[1] and best_alias_len >= existing[2]:
+                elif best_score == existing[1] and best_alias_len > existing[2]:
                     should_replace = True
 
                 if should_replace:
