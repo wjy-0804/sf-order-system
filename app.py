@@ -313,6 +313,27 @@ def parse_table(lines, sep):
                     if existing and existing[0] in header_map and header_map[existing[0]] == best_field:
                         del header_map[existing[0]]
 
+        # === SKU优先规则: 当表格同时有 SKU 和 商品名称 列时，SKU 优先作为托寄物内容1 ===
+        # 德风等电商导出常见模式：SKU 列是精简商品名（如"有机黄甜玉米 10斤"），
+        # 商品名称 列是完整描述（如"广东有机黄甜玉米 4.5斤｜现代生态种植..."）
+        # 此时应取 SKU 而非商品名称，也不应合并两列
+        if '托寄物内容1' in _match_score:
+            _prod_col = _match_score['托寄物内容1'][0]
+            _prod_col_text = header_line[_prod_col].strip() if _prod_col < len(header_line) else ''
+            # 检查是否存在独立 SKU 列
+            _sku_col = None
+            for i, cell in enumerate(header_line):
+                if not cell or i == _prod_col:
+                    continue
+                if cell.strip().upper() == 'SKU':
+                    _sku_col = i
+                    break
+            # 当前映射的是商品名称列，且存在 SKU 列 → 切换到 SKU
+            if _sku_col is not None and ('商品名称' in _prod_col_text or '商品名' in _prod_col_text):
+                del header_map[_prod_col]
+                header_map[_sku_col] = '托寄物内容1'
+                _match_score['托寄物内容1'] = (_sku_col, 1, 3)
+
         # Bug18修复: 商品+规格双列合并 — 某些电商表格将商品名和规格分两列（如 col=商品名称, col+1=规格）
         # 检测是否有"规格"类型列被托寄物内容1匹配到但未入选（被"商品名称"等更长别名覆盖）
         _spec_col = None
