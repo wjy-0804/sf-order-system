@@ -2150,17 +2150,50 @@ def _parse_excel_file(file_obj):
     """解析Excel文件(xlsx/xls)为订单列表
 
     支持：
+    - .xlsx: openpyxl 引擎
+    - .xls: xlrd 引擎（旧版Excel格式，如德风导出）
     - 标准表格（表头在第1行）
     - 有赞/电商导出（表头在最后一行，如"收货人姓名"在底部）
     - 多Sheet
     """
-    # 先保存到临时文件，再用openpyxl打开
-    with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
+    # === 根据文件扩展名选择解析引擎 ===
+    fname = (file_obj.filename or '').lower()
+    use_xlrd = fname.endswith('.xls') and not fname.endswith('.xlsx')
+
+    suffix = '.xls' if use_xlrd else '.xlsx'
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp_path = tmp.name
         file_obj.save(tmp_path)
 
     try:
-        wb = load_workbook(tmp_path)
+        if use_xlrd:
+            # 用 xlrd 读取旧版 .xls 格式
+            import xlrd as _xlrd
+            wb_xlrd = _xlrd.open_workbook(tmp_path)
+            sheet_names = wb_xlrd.sheet_names()
+
+            def _xlrd_cell_value(cell):
+                """将 xlrd 单元格转为统一格式（类比 openpyxl values_only）"""
+                if cell.ctype == _xlrd.XL_CELL_EMPTY:
+                    return None
+                if cell.ctype == _xlrd.XL_CELL_NUMBER:
+                    val = cell.value
+                    # 整数不保留 .0 后缀
+                    return int(val) if val == int(val) else val
+                if cell.ctype == _xlrd.XL_CELL_BOOLEAN:
+                    return bool(cell.value)
+                return cell.value
+
+            _sheets_data = {}
+            for sn in sheet_names:
+                sh = wb_xlrd.sheet_by_name(sn)
+                rows = []
+                for r in range(sh.nrows):
+                    row = tuple(_xlrd_cell_value(sh.cell(r, c)) for c in range(sh.ncols))
+                    rows.append(row)
+                _sheets_data[sn] = rows
+        else:
+            wb = load_workbook(tmp_path)
     except Exception as e:
         os.unlink(tmp_path)
         raise e
@@ -2215,22 +2248,14 @@ def _parse_excel_file(file_obj):
         # 典型垃圾："说明", "采购商品列表：每一行为...", "列表"
         return False
 
-    all_orders = []
-    for sheet_name in wb.sheetnames:
-        ws = wb[sheet_name]
-
-        # === Bug13修复: 跳过非数据Sheet ===
-        sheet_clean = sheet_name.strip()
-        if sheet_clean in _skip_sheet_patterns or any(p in sheet_clean for p in _skip_sheet_patterns):
-            continue
-
-        data_rows = list(ws.iter_rows(values_only=True))
+    def _process_sheet(data_rows):
+        """处理单个Sheet的数据行，返回订单列表"""
         if not data_rows or not any(data_rows[0]):
-            continue
+            return []
 
         total_rows = len(data_rows)
         if total_rows < 2:
-            continue
+            return []
 
         # === 检测表头位置：顶部(第1行) vs 底部(最后1行) ===
         first_is_header, first_score = _looks_like_header(data_rows[0])
@@ -2239,7 +2264,7 @@ def _parse_excel_file(file_obj):
         if last_is_header and not first_is_header:
             # 底部表头模式（有赞等电商导出）
             header_row = data_rows[-1]
-            data_lines = data_rows[:-1]  # 表头之前全是数据
+            data_lines = data_rows[:-1]
         elif first_is_header:
             # 标准表头在顶部
             header_row = data_rows[0]
@@ -2253,17 +2278,14 @@ def _parse_excel_file(file_obj):
             header_row = None
             data_lines = data_rows
 
-        # === Bug13修复: 过滤掉非订单数据行（说明文字、标题行等）===
+        # === 过滤掉非订单数据行（说明文字、标题行等）===
         if header_row is not None:
-            # 有表头时，过滤data_lines中看起来不像数据的行
             data_lines = [row for row in data_lines if _looks_like_data_row(row)]
         else:
-            # 无表头时更严格：必须像数据行
             data_lines = [row for row in data_rows if _looks_like_data_row(row)]
 
         lines = []
         if header_row is not None:
-            # 先输出表头行（让 parse_table 能识别）
             cells = [str(c).strip() if c is not None else '' for c in header_row]
             lines.append('\t'.join(cells))
 
@@ -2271,8 +2293,25 @@ def _parse_excel_file(file_obj):
             cells = [str(c).strip() if c is not None else '' for c in row_data]
             lines.append('\t'.join(cells))
 
-        sheet_orders = parse_table(lines, '\t')
-        all_orders.extend(sheet_orders)
+        return parse_table(lines, '\t')
+
+    all_orders = []
+    if use_xlrd:
+        for sheet_name in sheet_names:
+            sheet_clean = sheet_name.strip()
+            if sheet_clean in _skip_sheet_patterns or any(p in sheet_clean for p in _skip_sheet_patterns):
+                continue
+            sheet_orders = _process_sheet(_sheets_data[sheet_name])
+            all_orders.extend(sheet_orders)
+    else:
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            sheet_clean = sheet_name.strip()
+            if sheet_clean in _skip_sheet_patterns or any(p in sheet_clean for p in _skip_sheet_patterns):
+                continue
+            data_rows = list(ws.iter_rows(values_only=True))
+            sheet_orders = _process_sheet(data_rows)
+            all_orders.extend(sheet_orders)
 
     os.unlink(tmp_path)
     return all_orders
