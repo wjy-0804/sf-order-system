@@ -2498,6 +2498,13 @@ def sf_export_fill_tracking():
         '联系人', '姓名', '买家姓名', '客户姓名', 'name', 'receiver', '客户',
     ]
 
+    # 运单号/快递信息 列别名 —— 用于检测 B 表是否已有物流列
+    tracking_aliases = [
+        '运单号', '快递单号', '快递信息', '快递',
+        '回传物流单号栏', '物流单号', '物流', '快递单',
+        'tracking', 'shipping',
+    ]
+
     def _find_name_col(header_line):
         """在表头行中找收件人姓名列，返回列索引或 None"""
         best_col = None
@@ -2524,6 +2531,35 @@ def sf_export_fill_tracking():
                     best_len = hit_len
                     best_col = i
         return best_col
+
+    def _find_tracking_col(header_line):
+        """在表头行中找已有运单号/快递信息列，返回 (列索引, 表头名) 或 (None, None)"""
+        best_col = None
+        best_score = 0
+        best_len = 0
+        best_header = ''
+        for i, cell in enumerate(header_line):
+            cell_c = str(cell).strip()
+            if not cell_c:
+                continue
+            is_exact = any(a.lower() == cell_c.lower() for a in tracking_aliases)
+            is_sub   = any(a.lower() in cell_c.lower() for a in tracking_aliases)
+            is_in    = any(cell_c.lower() in a.lower() for a in tracking_aliases)
+            if is_exact or is_sub or is_in:
+                score = 3 if is_exact else (2 if is_sub else 1)
+                hit_len = 0
+                if is_exact:
+                    hit_len = max(len(a) for a in tracking_aliases if a.lower() == cell_c.lower())
+                elif is_sub:
+                    hit_len = max(len(a) for a in tracking_aliases if a.lower() in cell_c.lower())
+                else:
+                    hit_len = len(cell_c)
+                if score > best_score or (score == best_score and hit_len > best_len):
+                    best_score = score
+                    best_len = hit_len
+                    best_col = i
+                    best_header = cell_c
+        return best_col, best_header
 
     def _read_b_rows(order_file_obj):
         """读取B表为行列表，返回 (rows, error_msg)"""
@@ -2585,20 +2621,43 @@ def sf_export_fill_tracking():
                             'error': '未找到收件人/姓名列，请确认表头包含"收件人"、"姓名"等字段'})
             continue
 
-        # 插入运单号列
+        # 检测 B 表是否已有运单号/快递列
+        tracking_col, tracking_header = _find_tracking_col(b_rows[0])
+
         matched = 0
         out_wb = openpyxl.Workbook()
         out_ws = out_wb.active
         out_ws.title = 'Sheet1'
-        for ri, row in enumerate(b_rows):
-            if ri == 0:
-                out_ws.append(['运单号'] + row)
-            else:
-                name = row[name_col].strip() if name_col < len(row) else ''
-                tracking = name_to_tracking.get(name, '')
-                if tracking:
-                    matched += 1
-                out_ws.append([tracking] + row)
+
+        if tracking_col is not None:
+            # ✅ 已有物流列：直接回填到该列，不动表格结构
+            for ri, row in enumerate(b_rows):
+                if ri == 0:
+                    out_ws.append(row)
+                else:
+                    name = row[name_col].strip() if name_col < len(row) else ''
+                    tracking = name_to_tracking.get(name, '')
+                    if tracking:
+                        matched += 1
+                    # 确保行够长
+                    new_row = list(row)
+                    while len(new_row) <= tracking_col:
+                        new_row.append('')
+                    new_row[tracking_col] = tracking
+                    out_ws.append(new_row)
+            fill_mode = 'inplace'  # 原地填充
+        else:
+            # ⬅️ 无物流列：在最前面插入"运单号"列
+            for ri, row in enumerate(b_rows):
+                if ri == 0:
+                    out_ws.append(['运单号'] + row)
+                else:
+                    name = row[name_col].strip() if name_col < len(row) else ''
+                    tracking = name_to_tracking.get(name, '')
+                    if tracking:
+                        matched += 1
+                    out_ws.append([tracking] + row)
+            fill_mode = 'insert'  # 插入新列
 
         buf = io.BytesIO()
         out_wb.save(buf)
@@ -2611,6 +2670,8 @@ def sf_export_fill_tracking():
             'matched': matched,
             'total_b': len(b_rows) - 1,
             'xlsx_b64': xlsx_b64,
+            'fill_mode': fill_mode,
+            'tracking_col_name': tracking_header if tracking_col is not None else '',
         })
 
     return jsonify({

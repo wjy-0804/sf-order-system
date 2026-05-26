@@ -646,11 +646,14 @@ function doFillTracking() {
 
         if (item.success) {
           successCount++;
+          var modeText = item.fill_mode === 'inplace'
+            ? '&#128194; 已有「' + escapeHtml(item.tracking_col_name || '物流列') + '」列，原地填充'
+            : '&#10133; 已插入「运单号」列';
           row.innerHTML =
             '<span class="fri">&#9989;</span>' +
             '<div class="finfo">' +
               '<div class="fname">' + escapeHtml(item.download_name) + '</div>' +
-              '<div class="fstat">匹配 ' + item.matched + ' / ' + item.total_b + ' 条 · A表共 ' + data.a_count + ' 条运单号</div>' +
+              '<div class="fstat">' + modeText + ' · 匹配 ' + item.matched + ' / ' + item.total_b + ' 条 · A表共 ' + data.a_count + ' 条运单号</div>' +
             '</div>' +
             '<button class="fdl-btn">&#11015; 下载</button>';
 
