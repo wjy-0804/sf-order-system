@@ -2435,19 +2435,21 @@ def sf_export_parse():
 
 @app.route('/api/sf-export/fill-tracking', methods=['POST'])
 def sf_export_fill_tracking():
-    """运单号回填：上传A表(顺丰导出)和B表(客户订单)，按姓名匹配，在B表首列插入运单号，返回修改后的xlsx
+    """运单号回填：上传A表(顺丰导出)和多个B表(客户订单)，按姓名匹配，返回JSON数组（每项含base64 xlsx + 统计）
 
     请求: multipart/form-data
-      - sf_file:    顺丰导出 xls（A表），含运单号+收方联系人
-      - order_file: 客户订单 xlsx/xls（B表），含收件人姓名（任意格式）
+      - sf_file:      顺丰导出 xls（A表），含运单号+收方联系人
+      - order_files:  客户订单 xlsx/xls（B表，可多个），含收件人姓名（任意格式）
     """
-    sf_file    = request.files.get('sf_file')
-    order_file = request.files.get('order_file')
+    import base64 as _b64
+
+    sf_file     = request.files.get('sf_file')
+    order_files = request.files.getlist('order_files')
 
     if not sf_file or not sf_file.filename:
         return jsonify({'success': False, 'error': '请上传顺丰导出文件（A表）'}), 400
-    if not order_file or not order_file.filename:
-        return jsonify({'success': False, 'error': '请上传客户订单文件（B表）'}), 400
+    if not order_files:
+        return jsonify({'success': False, 'error': '请至少上传一个客户订单文件（B表）'}), 400
 
     # ── Step 1: 从 A 表提取 {姓名: 运单号} 映射 ──────────────────────────────
     try:
@@ -2476,117 +2478,132 @@ def sf_export_fill_tracking():
     if not name_to_tracking:
         return jsonify({'success': False, 'error': 'A表中未找到有效的运单号/收件人信息'}), 400
 
-    # ── Step 2: 读取 B 表，用 _build_header_map 识别收件人列 ──────────────────
-    b_fname = order_file.filename.lower()
-    suffix_b = '.xls' if (b_fname.endswith('.xls') and not b_fname.endswith('.xlsx')) else '.xlsx'
-    tmp_b = tempfile.NamedTemporaryFile(suffix=suffix_b, delete=False)
-    tmp_b_path = tmp_b.name
-    tmp_b.close()
-    order_file.save(tmp_b_path)
-
-    try:
-        if suffix_b == '.xls':
-            import xlrd as _xlrd2
-            wb_b_xlrd = _xlrd2.open_workbook(tmp_b_path)
-            sh_b = wb_b_xlrd.sheet_by_index(0)
-            b_rows = []
-            for r in range(sh_b.nrows):
-                row = []
-                for c in range(sh_b.ncols):
-                    cell = sh_b.cell(r, c)
-                    val = cell.value
-                    if cell.ctype == _xlrd2.XL_CELL_NUMBER and val == int(val):
-                        val = int(val)
-                    row.append(str(val).strip() if val != '' else '')
-                b_rows.append(row)
-        else:
-            wb_b = openpyxl.load_workbook(tmp_b_path)
-            ws_b = wb_b.active
-            b_rows = []
-            for row in ws_b.iter_rows(values_only=True):
-                b_rows.append([str(c).strip() if c is not None else '' for c in row])
-    except Exception as e:
-        return jsonify({'success': False, 'error': f'B表读取失败：{e}'}), 400
-    finally:
-        if os.path.exists(tmp_b_path):
-            os.unlink(tmp_b_path)
-
-    if len(b_rows) < 2:
-        return jsonify({'success': False, 'error': 'B表数据不足，至少需要1行表头+1行数据'}), 400
-
-    # 找收件人列 —— 复用 parse_table 的 field_aliases 匹配逻辑
-    header_line = b_rows[0]
+    # 收件人别名列表（复用 parse_table 的 field_aliases）
     name_aliases = [
         '收货人/提货人姓名', '收件人姓名', '收货人姓名', '收件人', '收货人',
         '联系人', '姓名', '买家姓名', '客户姓名', 'name', 'receiver', '客户',
     ]
-    name_col = None
-    best_score = 0
-    best_len = 0
-    for i, cell in enumerate(header_line):
-        cell_c = cell.strip()
-        if not cell_c:
-            continue
-        is_exact = any(a.lower() == cell_c.lower() for a in name_aliases)
-        is_sub   = any(a.lower() in cell_c.lower() for a in name_aliases)
-        is_in    = any(cell_c.lower() in a.lower() for a in name_aliases)
-        if is_exact or is_sub or is_in:
-            score = 3 if is_exact else (2 if is_sub else 1)
-            hit_len = 0
-            if is_exact:
-                hit_len = max(len(a) for a in name_aliases if a.lower() == cell_c.lower())
-            elif is_sub:
-                hit_len = max(len(a) for a in name_aliases if a.lower() in cell_c.lower())
+
+    def _find_name_col(header_line):
+        """在表头行中找收件人姓名列，返回列索引或 None"""
+        best_col = None
+        best_score = 0
+        best_len = 0
+        for i, cell in enumerate(header_line):
+            cell_c = str(cell).strip()
+            if not cell_c:
+                continue
+            is_exact = any(a.lower() == cell_c.lower() for a in name_aliases)
+            is_sub   = any(a.lower() in cell_c.lower() for a in name_aliases)
+            is_in    = any(cell_c.lower() in a.lower() for a in name_aliases)
+            if is_exact or is_sub or is_in:
+                score = 3 if is_exact else (2 if is_sub else 1)
+                hit_len = 0
+                if is_exact:
+                    hit_len = max(len(a) for a in name_aliases if a.lower() == cell_c.lower())
+                elif is_sub:
+                    hit_len = max(len(a) for a in name_aliases if a.lower() in cell_c.lower())
+                else:
+                    hit_len = len(cell_c)
+                if score > best_score or (score == best_score and hit_len > best_len):
+                    best_score = score
+                    best_len = hit_len
+                    best_col = i
+        return best_col
+
+    def _read_b_rows(order_file_obj):
+        """读取B表为行列表，返回 (rows, error_msg)"""
+        b_fname = order_file_obj.filename.lower()
+        suffix_b = '.xls' if (b_fname.endswith('.xls') and not b_fname.endswith('.xlsx')) else '.xlsx'
+        tmp_b = tempfile.NamedTemporaryFile(suffix=suffix_b, delete=False)
+        tmp_b_path = tmp_b.name
+        tmp_b.close()
+        order_file_obj.save(tmp_b_path)
+        try:
+            if suffix_b == '.xls':
+                import xlrd as _xlrd2
+                wb_b_xlrd = _xlrd2.open_workbook(tmp_b_path)
+                sh_b = wb_b_xlrd.sheet_by_index(0)
+                rows = []
+                for r in range(sh_b.nrows):
+                    row = []
+                    for c in range(sh_b.ncols):
+                        cell = sh_b.cell(r, c)
+                        val = cell.value
+                        if cell.ctype == _xlrd2.XL_CELL_NUMBER and val == int(val):
+                            val = int(val)
+                        row.append(str(val).strip() if val != '' else '')
+                    rows.append(row)
             else:
-                hit_len = len(cell_c)
-            if score > best_score or (score == best_score and hit_len > best_len):
-                best_score = score
-                best_len = hit_len
-                name_col = i
+                wb_b = openpyxl.load_workbook(tmp_b_path)
+                ws_b = wb_b.active
+                rows = []
+                for row in ws_b.iter_rows(values_only=True):
+                    rows.append([str(c).strip() if c is not None else '' for c in row])
+            return rows, None
+        except Exception as e:
+            return None, str(e)
+        finally:
+            if os.path.exists(tmp_b_path):
+                os.unlink(tmp_b_path)
 
-    if name_col is None:
-        return jsonify({'success': False,
-                        'error': 'B表中未找到收件人/姓名列，请确认表头包含"收件人"、"姓名"等字段'}), 400
+    # ── Step 2: 逐个处理每个 B 表 ─────────────────────────────────────────────
+    results = []
+    for order_file in order_files:
+        orig_name = order_file.filename or 'unknown.xlsx'
+        orig_stem = orig_name.rsplit('.', 1)[0] if '.' in orig_name else orig_name
+        download_name = f'{orig_stem}_已填运单号_{datetime.now().strftime("%m%d")}.xlsx'
 
-    # ── Step 3: 在 B 表最前列插入「运单号」并按姓名填充 ────────────────────────
-    matched = 0
-    out_wb = openpyxl.Workbook()
-    out_ws = out_wb.active
-    out_ws.title = 'Sheet1'
+        b_rows, err = _read_b_rows(order_file)
+        if err:
+            results.append({'filename': orig_name, 'download_name': download_name,
+                            'success': False, 'error': f'读取失败：{err}'})
+            continue
+        if len(b_rows) < 2:
+            results.append({'filename': orig_name, 'download_name': download_name,
+                            'success': False, 'error': 'B表数据不足（需至少1行表头+1行数据）'})
+            continue
 
-    for ri, row in enumerate(b_rows):
-        if ri == 0:
-            # 表头行：最前面插入「运单号」
-            new_row = ['运单号'] + row
-        else:
-            # 数据行：取姓名，查运单号
-            name = row[name_col].strip() if name_col < len(row) else ''
-            tracking = name_to_tracking.get(name, '')
-            if tracking:
-                matched += 1
-            new_row = [tracking] + row
-        out_ws.append(new_row)
+        name_col = _find_name_col(b_rows[0])
+        if name_col is None:
+            results.append({'filename': orig_name, 'download_name': download_name,
+                            'success': False,
+                            'error': '未找到收件人/姓名列，请确认表头包含"收件人"、"姓名"等字段'})
+            continue
 
-    buf = io.BytesIO()
-    out_wb.save(buf)
-    buf.seek(0)
+        # 插入运单号列
+        matched = 0
+        out_wb = openpyxl.Workbook()
+        out_ws = out_wb.active
+        out_ws.title = 'Sheet1'
+        for ri, row in enumerate(b_rows):
+            if ri == 0:
+                out_ws.append(['运单号'] + row)
+            else:
+                name = row[name_col].strip() if name_col < len(row) else ''
+                tracking = name_to_tracking.get(name, '')
+                if tracking:
+                    matched += 1
+                out_ws.append([tracking] + row)
 
-    # 用原文件名生成下载名
-    orig_stem = order_file.filename.rsplit('.', 1)[0] if '.' in order_file.filename else order_file.filename
-    download_name = f'{orig_stem}_已填运单号_{datetime.now().strftime("%m%d")}.xlsx'
+        buf = io.BytesIO()
+        out_wb.save(buf)
+        xlsx_b64 = _b64.b64encode(buf.getvalue()).decode('utf-8')
 
-    # 把统计信息通过 header 传回（下载接口无法放 JSON body）
-    resp = send_file(
-        buf,
-        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        as_attachment=True,
-        download_name=download_name,
-    )
-    resp.headers['X-Matched-Count']   = str(matched)
-    resp.headers['X-Total-B-Rows']    = str(len(b_rows) - 1)
-    resp.headers['X-A-Mapping-Count'] = str(len(name_to_tracking))
-    resp.headers['Access-Control-Expose-Headers'] = 'X-Matched-Count,X-Total-B-Rows,X-A-Mapping-Count'
-    return resp
+        results.append({
+            'filename': orig_name,
+            'download_name': download_name,
+            'success': True,
+            'matched': matched,
+            'total_b': len(b_rows) - 1,
+            'xlsx_b64': xlsx_b64,
+        })
+
+    return jsonify({
+        'success': True,
+        'a_count': len(name_to_tracking),
+        'results': results,
+    })
 
 
 @app.route('/api/sf-export/download', methods=['POST'])
