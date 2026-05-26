@@ -214,6 +214,7 @@ def parse_table(lines, sep):
             '联系人', '姓名', '买家姓名', '客户姓名', 'name', 'receiver', '客户',
         ],
         '收件电话': [
+            '收件人电话',  # 花城/帮会等导出标准（精确！区别于"寄件人电话"）
             '收货人/提货人手机号',  # 微店导出标准（精确！含/分隔符）
             '收货人手机号码', '收件人手机号码', '收货人手机号',  # 电商标准（精确！含"收货人×"前缀）
             '收货人电话',  # 乡伴/有赞等电商导出标准
@@ -222,6 +223,7 @@ def parse_table(lines, sep):
             '手机', '电话', 'phone', 'mobile', 'tel', '联系方式',
         ],
         '收件详细地址': [
+            '收件人全地址',  # 花城/帮会等导出标准（精确！完整的省市区+街道，区别于"收件人街道地址"）
             '收货/提货详细地址',  # 微店导出标准（精确！含/分隔符）
             '收货人完整地址', '收件人完整地址', '收货人详细地址',  # 电商标准（含"收货人×"/"收件人×"前缀）
             '收货人地址',  # 乡伴/有赞等电商导出标准
@@ -230,6 +232,7 @@ def parse_table(lines, sep):
             'address', '收件地址', '送货地址', '送达地址',
         ],
         '托寄物内容1': [
+            '产品',  # 花城/帮会等导出标准（精确！区别于"规格"列）
             'SKU规格', 'SKU名称',  # 电商标准（精确！）
             '商品规格', '商品名称', '规格',  # 带/不带前缀的规格列
             '托寄物内容1', '货物', '物品', '品名', '商品',
@@ -242,6 +245,9 @@ def parse_table(lines, sep):
         ],
     }
     
+    # Bug18修复: 商品+规格双列合并 — _spec_col 需在 if/else 之前初始化
+    _spec_col = None
+
     # 尝试识别表头（双向匹配：别名∈单元格 或 单元格∈别名）
     is_header = False
     for cell in header_line:
@@ -274,7 +280,16 @@ def parse_table(lines, sep):
             best_field = None
             best_score = 0
             best_alias_len = 0  # 命中别名的字符长度（用于同分时的二级排序）
+
+            # 寄件/发件人列不能匹配收件字段（防止"寄件人电话"被误匹配为收件电话）
+            _is_sender_col = ('寄件' in cell_clean or '发件' in cell_clean)
+            _receiver_fields = {'收件人', '收件电话', '收件详细地址', '收件公司'}
+
             for field, aliases in field_aliases.items():
+                # 寄件人列跳过收件字段
+                if _is_sender_col and field in _receiver_fields:
+                    continue
+
                 is_exact = any(a.lower() == cell_clean.lower() for a in aliases)
                 is_sub_in_cell = any(a.lower() in cell_clean.lower() for a in aliases)  # 别名是单元格子串
                 is_cell_in_alias = any(cell_clean.lower() in a.lower() for a in aliases)  # 单元格是别名子串
@@ -336,7 +351,6 @@ def parse_table(lines, sep):
 
         # Bug18修复: 商品+规格双列合并 — 某些电商表格将商品名和规格分两列（如 col=商品名称, col+1=规格）
         # 检测是否有"规格"类型列被托寄物内容1匹配到但未入选（被"商品名称"等更长别名覆盖）
-        _spec_col = None
         if '托寄物内容1' in _match_score:
             prod_main_col = _match_score['托寄物内容1'][0]
             _spec_keywords = ('规格', 'SKU规格', 'spec', '型号', 'size')
