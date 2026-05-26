@@ -240,10 +240,46 @@
   .notif-success { background: var(--success); color: white; }
   .notif-error { background: #ef4444; color: white; }
   .hidden { display: none !important; }
-  @media (max-width: 768px) {
-    .company-grid { grid-template-columns: 1fr; }
-    .main { padding: 16px; }
-    .header { padding: 0 16px; }
+
+  /* ── 运单号回填区块 ── */
+  .fill-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 20px;
+  }
+  .fill-drop {
+    border: 2px dashed var(--border);
+    border-radius: 10px;
+    padding: 24px 16px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.25s;
+    background: #fafbfc;
+    position: relative;
+  }
+  .fill-drop:hover, .fill-drop.dragover { border-color: var(--primary); background: var(--primary-light); }
+  .fill-drop.has-file { border-color: var(--success); background: #f0fdf8; }
+  .fill-drop .fill-icon { font-size: 30px; margin-bottom: 8px; }
+  .fill-drop .fill-label { font-size: 13px; font-weight: 700; color: var(--text); margin-bottom: 4px; }
+  .fill-drop .fill-hint { font-size: 12px; color: var(--text-muted); }
+  .fill-drop .fill-filename {
+    font-size: 12px; color: var(--success); font-weight: 600;
+    margin-top: 6px; word-break: break-all;
+  }
+  .fill-result-bar {
+    display: flex; gap: 12px; align-items: center;
+    padding: 14px 18px;
+    background: #f0fdf8;
+    border-radius: 10px;
+    border: 1px solid #6ee7b7;
+    margin-top: 16px;
+  }
+  .fill-result-bar .ri { font-size: 20px; }
+  .fill-result-bar .rt { font-size: 14px; font-weight: 600; color: #065f46; flex: 1; }
+  .fill-result-bar .rs { font-size: 12px; color: #047857; }
+  @media (max-width: 600px) {
+    .fill-grid { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -301,6 +337,61 @@
       <button class="btn btn-ghost btn-sm" onclick="resetUpload()">&#128194; 换文件</button>
     </div>
     <div class="company-grid" id="companyGrid"></div>
+  </div>
+
+  <!-- ── 运单号回填 ─────────────────────────────────────────── -->
+  <div class="card" id="fillCard" style="margin-top:24px;">
+    <div class="card-header">
+      <div class="card-title">
+        <div class="icon">&#128203;</div>
+        运单号回填
+      </div>
+      <span style="font-size:12px;color:var(--text-muted);">按姓名匹配，自动将运单号写入客户订单表格</span>
+    </div>
+    <div class="card-body">
+      <div style="font-size:13px;color:var(--text-muted);margin-bottom:16px;line-height:1.7;">
+        上传两个文件：<strong>A表（顺丰导出，含运单号）</strong> + <strong>B表（客户订单，含收件人姓名）</strong>，系统自动在B表最前列插入「运单号」列，按姓名匹配填入。
+      </div>
+      <div class="fill-grid">
+        <!-- A 表 -->
+        <div class="fill-drop" id="fillDropA"
+             onclick="document.getElementById('fillInputA').click()"
+             ondragover="fillDragOver(event,'A')" ondragleave="fillDragLeave('A')" ondrop="fillDrop(event,'A')">
+          <div class="fill-icon">&#128228;</div>
+          <div class="fill-label">A 表 — 顺丰导出文件</div>
+          <div class="fill-hint">含「运单号」和「收方|联系人」列</div>
+          <div class="fill-hint" style="margin-top:4px;">支持 .xls / .xlsx</div>
+          <div class="fill-filename" id="fillNameA"></div>
+        </div>
+        <input type="file" id="fillInputA" accept=".xls,.xlsx" style="display:none" onchange="fillSelectFile('A',this.files[0])">
+
+        <!-- B 表 -->
+        <div class="fill-drop" id="fillDropB"
+             onclick="document.getElementById('fillInputB').click()"
+             ondragover="fillDragOver(event,'B')" ondragleave="fillDragLeave('B')" ondrop="fillDrop(event,'B')">
+          <div class="fill-icon">&#128203;</div>
+          <div class="fill-label">B 表 — 客户订单文件</div>
+          <div class="fill-hint">含收件人姓名列（格式不限）</div>
+          <div class="fill-hint" style="margin-top:4px;">支持 .xls / .xlsx</div>
+          <div class="fill-filename" id="fillNameB"></div>
+        </div>
+        <input type="file" id="fillInputB" accept=".xls,.xlsx" style="display:none" onchange="fillSelectFile('B',this.files[0])">
+      </div>
+
+      <div style="text-align:center;">
+        <button class="btn btn-primary" id="btnFill" onclick="doFillTracking()" disabled style="padding:12px 40px;font-size:15px;">
+          &#9889; 开始匹配并下载
+        </button>
+      </div>
+
+      <div class="fill-result-bar hidden" id="fillResultBar">
+        <span class="ri">&#9989;</span>
+        <div>
+          <div class="rt" id="fillResultTitle"></div>
+          <div class="rs" id="fillResultSub"></div>
+        </div>
+      </div>
+    </div>
   </div>
 
 </main>
@@ -467,6 +558,97 @@ function escapeHtml(str) {
 function escapeJs(str) {
   return str.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"');
 }
+
+// ── 运单号回填功能 ────────────────────────────────────────────────────────────
+var fillFileA = null;
+var fillFileB = null;
+
+function fillSelectFile(which, file) {
+  if (!file) return;
+  var fname = file.name.toLowerCase();
+  if (!fname.endsWith('.xls') && !fname.endsWith('.xlsx')) {
+    showNotif('仅支持 .xls 或 .xlsx 格式', 'error'); return;
+  }
+  if (which === 'A') {
+    fillFileA = file;
+    document.getElementById('fillDropA').classList.add('has-file');
+    document.getElementById('fillNameA').textContent = '✓ ' + file.name;
+  } else {
+    fillFileB = file;
+    document.getElementById('fillDropB').classList.add('has-file');
+    document.getElementById('fillNameB').textContent = '✓ ' + file.name;
+  }
+  document.getElementById('btnFill').disabled = !(fillFileA && fillFileB);
+}
+
+function fillDragOver(e, which) {
+  e.preventDefault();
+  document.getElementById('fillDrop' + which).classList.add('dragover');
+}
+function fillDragLeave(which) {
+  document.getElementById('fillDrop' + which).classList.remove('dragover');
+}
+function fillDrop(e, which) {
+  e.preventDefault();
+  document.getElementById('fillDrop' + which).classList.remove('dragover');
+  var file = e.dataTransfer.files[0];
+  if (file) fillSelectFile(which, file);
+}
+
+function doFillTracking() {
+  if (!fillFileA || !fillFileB) return;
+  var btn = document.getElementById('btnFill');
+  btn.disabled = true;
+  btn.innerHTML = '&#9203; 匹配中...';
+  document.getElementById('fillResultBar').classList.add('hidden');
+
+  var fd = new FormData();
+  fd.append('sf_file', fillFileA);
+  fd.append('order_file', fillFileB);
+
+  fetch('/api/sf-export/fill-tracking', { method: 'POST', body: fd })
+    .then(function(r) {
+      if (!r.ok) {
+        return r.json().then(function(d) { throw new Error(d.error || '请求失败'); });
+      }
+      var matched = r.headers.get('X-Matched-Count') || '?';
+      var totalB  = r.headers.get('X-Total-B-Rows')  || '?';
+      var totalA  = r.headers.get('X-A-Mapping-Count') || '?';
+
+      var disp = r.headers.get('Content-Disposition') || '';
+      var match = disp.match(/filename[^;=\n]*=(?:(\\?['"])(.*?)\1|(?:[^\s])+)/);
+      var filename = match ? decodeURIComponent(match[2] || match[0]) : 'result.xlsx';
+
+      return r.blob().then(function(blob) {
+        return { blob: blob, filename: filename, matched: matched, totalB: totalB, totalA: totalA };
+      });
+    })
+    .then(function(res) {
+      // 触发下载
+      var url = URL.createObjectURL(res.blob);
+      var a = document.createElement('a');
+      a.href = url; a.download = res.filename;
+      document.body.appendChild(a); a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      // 显示结果
+      document.getElementById('fillResultTitle').textContent =
+        '匹配完成！已匹配 ' + res.matched + ' 条 / B表共 ' + res.totalB + ' 条';
+      document.getElementById('fillResultSub').textContent =
+        'A表共 ' + res.totalA + ' 条运单号参与匹配 · 文件已自动下载';
+      document.getElementById('fillResultBar').classList.remove('hidden');
+      showNotif('✓ 运单号回填完成，文件已下载', 'success');
+    })
+    .catch(function(err) {
+      showNotif('❌ 回填失败：' + err.message, 'error');
+    })
+    .finally(function() {
+      btn.disabled = false;
+      btn.innerHTML = '&#9889; 开始匹配并下载';
+    });
+}
+
 </script>
 
 </body>
