@@ -1470,8 +1470,22 @@ async function parseAll() {
     } else {
       showNotif(data.error || '识别失败', 'error');
     }
+    // 部分文件解析成功但有警告
+    if (data.success && data.warnings && data.warnings.length > 0) {
+      setTimeout(() => {
+        showNotif('⚠️ ' + data.warnings.join('；'), 'error');
+      }, 2000);
+    }
   } catch(e) {
-    showNotif('服务连接失败，请确认后端已启动', 'error');
+    // 区分连接失败 vs 响应解析失败
+    if (e instanceof SyntaxError) {
+      showNotif('服务返回异常响应，请刷新页面后重试', 'error');
+    } else if (e.name === 'TypeError' && e.message.includes('fetch')) {
+      showNotif('无法连接到服务器，请检查网络或联系管理员', 'error');
+    } else {
+      showNotif('识别出错：' + (e.message || '未知错误'), 'error');
+    }
+    console.error('parseAndGenerate error:', e);
   }
 
   btn.innerHTML = '<span id="parseBtnText">' + refreshParseBtnText() + '</span>';

@@ -2125,6 +2125,7 @@ def upload_and_parse():
     all_orders = []
     from_text = 0
     from_files = 0
+    file_errors = []  # 收集每个文件的解析错误，方便前端展示
 
     # ---- 1. 解析文本部分 ----
     text = request.form.get('text', '').strip()
@@ -2134,37 +2135,53 @@ def upload_and_parse():
             all_orders.extend(text_orders)
             from_text = len(text_orders)
         except Exception as e:
-            pass
+            pass  # 文本解析失败不阻断文件
 
     # ---- 2. 解析上传的文件（支持多个）----
     uploaded_files = request.files.getlist('files[]')
     for f in uploaded_files:
         if not f or not f.filename:
             continue
-        fname = f.filename.lower()
+        orig_name = f.filename
+        fname = orig_name.lower()
         try:
             if fname.endswith('.csv'):
                 file_orders = _parse_csv_file(f)
             elif fname.endswith(('.xlsx', '.xls')):
                 file_orders = _parse_excel_file(f)
             else:
+                file_errors.append(f'{orig_name}：不支持的文件格式（仅支持 .xlsx/.xls/.csv）')
                 continue
-            all_orders.extend(file_orders)
-            from_files += len(file_orders)
+            if file_orders:
+                all_orders.extend(file_orders)
+                from_files += len(file_orders)
+            else:
+                file_errors.append(f'{orig_name}：未识别到有效订单（请检查表头是否包含收件人、电话、地址、商品列）')
         except Exception as e:
-            # 单个文件失败不阻断其他
-            continue
+            import traceback
+            tb = traceback.format_exc()
+            app.logger.error(f'文件解析失败 [{orig_name}]: {e}\n{tb}')
+            file_errors.append(f'{orig_name}：解析出错 — {str(e)}')
 
     if not all_orders:
-        return jsonify({'success': False, 'error': '未能从文本或文件中识别到有效订单'})
+        # 构造详细错误信息
+        if file_errors:
+            err_msg = '文件识别失败：' + '；'.join(file_errors)
+        else:
+            err_msg = '未能从文本或文件中识别到有效订单'
+        return jsonify({'success': False, 'error': err_msg})
 
-    return jsonify({
+    resp = {
         'success': True,
         'orders': all_orders,
         'count': len(all_orders),
         'from_text': from_text,
         'from_files': from_files,
-    })
+    }
+    # 即使部分文件失败，也把警告附上
+    if file_errors:
+        resp['warnings'] = file_errors
+    return jsonify(resp)
 
 
 def _parse_csv_file(file_obj):
