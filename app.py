@@ -2482,12 +2482,25 @@ def sf_export_fill_tracking():
 
     COL_TRACKING = 3
     COL_CONTACT  = 19
-    name_to_tracking = {}   # {姓名: 运单号}，同名取第一个
+
+    # ── 姓名清洗：去掉【xxx】/[xxx]/(xxx)/，去掉"收货"等无关后缀 ──
+
+    def _clean_name(raw):
+        """清洗姓名：去掉编号后缀、标点、无关字"""
+        s = str(raw).strip()
+        s = re.sub(r'[【(（\[]\s*\d{2,6}\s*[】)）\]]$', '', s)  # 去编号后缀
+        s = re.sub(r'[,\s，、]+$', '', s)                         # 去尾部标点
+        s = re.sub(r'收货$', '', s)                               # 去尾部"收货"
+        return s.strip()
+
+    name_to_tracking = {}   # {清洗后姓名: 运单号}，同名取第一个
     for r in range(1, sh_a.nrows):
         tracking = str(sh_a.cell_value(r, COL_TRACKING)).strip()
         contact  = str(sh_a.cell_value(r, COL_CONTACT)).strip()
-        if tracking and contact and contact not in name_to_tracking:
-            name_to_tracking[contact] = tracking
+        if tracking and contact:
+            clean = _clean_name(contact)
+            if clean and clean not in name_to_tracking:
+                name_to_tracking[clean] = tracking
 
     if not name_to_tracking:
         return jsonify({'success': False, 'error': 'A表中未找到有效的运单号/收件人信息'}), 400
@@ -2635,7 +2648,8 @@ def sf_export_fill_tracking():
                 if ri == 0:
                     out_ws.append(row)
                 else:
-                    name = row[name_col].strip() if name_col < len(row) else ''
+                    raw_name = row[name_col] if name_col < len(row) else ''
+                    name = _clean_name(raw_name)
                     tracking = name_to_tracking.get(name, '')
                     if tracking:
                         matched += 1
@@ -2652,7 +2666,8 @@ def sf_export_fill_tracking():
                 if ri == 0:
                     out_ws.append(['运单号'] + row)
                 else:
-                    name = row[name_col].strip() if name_col < len(row) else ''
+                    raw_name = row[name_col] if name_col < len(row) else ''
+                    name = _clean_name(raw_name)
                     tracking = name_to_tracking.get(name, '')
                     if tracking:
                         matched += 1
