@@ -227,6 +227,7 @@ def parse_table(lines, sep):
             '收货/提货详细地址',  # 微店导出标准（精确！含/分隔符）
             '收货人完整地址', '收件人完整地址', '收货人详细地址',  # 电商标准（含"收货人×"/"收件人×"前缀）
             '收货人地址',  # 乡伴/有赞等电商导出标准
+            '收件人地址',  # 山谷云岚等导出标准（精确！区别于"收件人"纯姓名列）
             '收件详细地址', '收货详细地址',
             '收货地址', '地址', '详细地址',
             'address', '收件地址', '送货地址', '送达地址',
@@ -281,8 +282,8 @@ def parse_table(lines, sep):
             best_score = 0
             best_alias_len = 0  # 命中别名的字符长度（用于同分时的二级排序）
 
-            # 寄件/发件人列不能匹配收件字段（防止"寄件人电话"被误匹配为收件电话）
-            _is_sender_col = ('寄件' in cell_clean or '发件' in cell_clean)
+            # 寄件/发件/发货人列不能匹配收件字段（防止"寄件人电话"/"发货地址"被误匹配为收件字段）
+            _is_sender_col = ('寄件' in cell_clean or '发件' in cell_clean or '发货' in cell_clean)
             _receiver_fields = {'收件人', '收件电话', '收件详细地址', '收件公司'}
 
             for field, aliases in field_aliases.items():
