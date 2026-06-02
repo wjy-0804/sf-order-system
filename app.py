@@ -90,6 +90,19 @@ def init_db():
             FOREIGN KEY (group_id) REFERENCES address_groups(id) ON DELETE CASCADE
         )
     ''')
+    # 导出存档表：每次导出时记录，保留72小时供重新下载
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS export_archives (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            filename TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            order_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    ''')
     # 创建默认管理员账号 lmy123 / lmy123（超级管理员）
     c.execute('SELECT id, is_admin FROM users WHERE username = ?', ('lmy123',))
     existing = c.fetchone()
@@ -135,6 +148,9 @@ SF_TEMPLATE_PATH = os.environ.get(
 )
 STATS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stats')
 os.makedirs(STATS_DIR, exist_ok=True)
+
+ARCHIVES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'archives')
+os.makedirs(ARCHIVES_DIR, exist_ok=True)
 
 # 顺丰模版列头（按顺序）
 SF_COLUMNS = [
@@ -1973,7 +1989,7 @@ def parse():
 @app.route('/api/generate', methods=['POST'])
 @login_required
 def generate():
-    """生成Excel文件"""
+    """生成Excel文件，并存档72小时"""
     data = request.json
     orders = data.get('orders', [])
     defaults = data.get('defaults', {})
@@ -1986,9 +2002,35 @@ def generate():
         duplicates = data.get('duplicates', [])
         excel_buf = generate_excel(final_orders, duplicates)
         
-        date_str = datetime.now().strftime('%Y-%m-%d')
-        filename = f'顺丰{date_str}.xlsx'
-        
+        now = datetime.now()
+        date_str = now.strftime('%Y-%m-%d')
+        time_str = now.strftime('%H%M%S')
+        filename = f'顺丰{date_str}_{time_str}.xlsx'
+
+        # === 存档：保留72小时 ===
+        try:
+            import uuid
+            archive_id = uuid.uuid4().hex
+            archive_path = os.path.join(ARCHIVES_DIR, f'{archive_id}.xlsx')
+            excel_buf.seek(0)
+            with open(archive_path, 'wb') as af:
+                af.write(excel_buf.read())
+            excel_buf.seek(0)  # 重置供 send_file 读取
+
+            expires_at = (now + timedelta(hours=72)).strftime('%Y-%m-%d %H:%M:%S')
+            conn = get_db()
+            conn.execute(
+                'INSERT INTO export_archives (user_id, filename, file_path, order_count, created_at, expires_at) VALUES (?,?,?,?,?,?)',
+                (session['user_id'], filename, archive_path, len(final_orders),
+                 now.strftime('%Y-%m-%d %H:%M:%S'), expires_at)
+            )
+            conn.commit()
+            conn.close()
+            # 顺带清理过期存档
+            _cleanup_archives()
+        except Exception:
+            pass  # 存档失败不影响正常导出
+
         return send_file(
             excel_buf,
             mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -1997,6 +2039,90 @@ def generate():
         )
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
+
+
+# ======================== 导出存档 API ========================
+
+def _cleanup_archives():
+    """清理过期存档文件和数据库记录"""
+    try:
+        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        conn = get_db()
+        # 找出过期记录
+        rows = conn.execute(
+            'SELECT id, file_path FROM export_archives WHERE expires_at <= ?', (now_str,)
+        ).fetchall()
+        for row in rows:
+            try:
+                if os.path.exists(row['file_path']):
+                    os.unlink(row['file_path'])
+            except Exception:
+                pass
+        if rows:
+            ids = [r['id'] for r in rows]
+            conn.execute(
+                'DELETE FROM export_archives WHERE id IN ({})'.format(','.join('?' * len(ids))),
+                ids
+            )
+            conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+@app.route('/api/archives', methods=['GET'])
+@login_required
+def list_archives():
+    """列出当前用户72小时内的导出存档"""
+    _cleanup_archives()
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    conn = get_db()
+    rows = conn.execute(
+        'SELECT id, filename, order_count, created_at, expires_at FROM export_archives '
+        'WHERE user_id = ? AND expires_at > ? ORDER BY created_at DESC',
+        (session['user_id'], now_str)
+    ).fetchall()
+    conn.close()
+    archives = []
+    for r in rows:
+        # 计算剩余时间（小时）
+        expires_dt = datetime.strptime(r['expires_at'], '%Y-%m-%d %H:%M:%S')
+        remaining_h = max(0, int((expires_dt - datetime.now()).total_seconds() / 3600))
+        remaining_m = max(0, int((expires_dt - datetime.now()).total_seconds() % 3600 / 60))
+        archives.append({
+            'id': r['id'],
+            'filename': r['filename'],
+            'order_count': r['order_count'],
+            'created_at': r['created_at'],
+            'expires_at': r['expires_at'],
+            'remaining': f'{remaining_h}小时{remaining_m}分' if remaining_h > 0 else f'{remaining_m}分钟',
+        })
+    return jsonify({'archives': archives})
+
+
+@app.route('/api/archives/<int:archive_id>/download', methods=['GET'])
+@login_required
+def download_archive(archive_id):
+    """下载指定存档文件"""
+    conn = get_db()
+    row = conn.execute(
+        'SELECT filename, file_path, expires_at FROM export_archives WHERE id = ? AND user_id = ?',
+        (archive_id, session['user_id'])
+    ).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({'success': False, 'error': '存档不存在或已过期'}), 404
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    if row['expires_at'] <= now_str:
+        return jsonify({'success': False, 'error': '存档已过期（超过72小时）'}), 410
+    if not os.path.exists(row['file_path']):
+        return jsonify({'success': False, 'error': '存档文件丢失'}), 404
+    return send_file(
+        row['file_path'],
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        as_attachment=True,
+        download_name=row['filename']
+    )
 
 
 @app.route('/api/business_types', methods=['GET'])

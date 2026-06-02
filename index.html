@@ -1018,6 +1018,18 @@
         <div class="help-text" style="text-align:center;margin-top:10px;">
           导出后将下载 <b>顺丰导入_YYYYMMDD_HHmmss.xlsx</b> 文件，可直接导入顺丰打单工具
         </div>
+
+        <!-- 导出存档 -->
+        <div style="margin-top:20px;">
+          <div style="font-size:14px;font-weight:600;margin-bottom:10px;display:flex;align-items:center;gap:8px;">
+            🗂️ 近期导出存档
+            <span style="font-size:12px;font-weight:400;color:var(--text-muted);">保留72小时，直接下载无需重新识别</span>
+            <button onclick="loadArchives()" style="margin-left:auto;background:none;border:1px solid var(--border);border-radius:6px;padding:2px 10px;font-size:12px;cursor:pointer;color:var(--text-muted);">🔄 刷新</button>
+          </div>
+          <div id="archiveList" style="min-height:48px;">
+            <div style="color:var(--text-muted);font-size:13px;padding:12px 0;">加载中...</div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -1549,7 +1561,7 @@ function goStep(n) {
     const qc2 = document.getElementById('quickCompany2');
     if (qc2 && qc1) qc2.value = qc1.value;
   }
-  if (n === 3) renderPreview();
+  if (n === 3) { renderPreview(); loadArchives(); }
 }
 
 // ======================== Defaults Panel ========================
@@ -2090,6 +2102,58 @@ async function exportExcel() {
 
   btn.innerHTML = '📥 导出顺丰模版 Excel';
   btn.disabled = false;
+  // 导出完成后刷新存档列表
+  loadArchives();
+}
+
+// ======================== 导出存档 ========================
+async function loadArchives() {
+  const el = document.getElementById('archiveList');
+  if (!el) return;
+  try {
+    const res = await fetch('/api/archives');
+    if (!res.ok) { el.innerHTML = '<div style="color:var(--text-muted);font-size:13px;padding:12px 0;">加载失败</div>'; return; }
+    const data = await res.json();
+    const list = data.archives || [];
+    if (list.length === 0) {
+      el.innerHTML = '<div style="color:var(--text-muted);font-size:13px;padding:12px 0;">暂无存档，导出后自动保存</div>';
+      return;
+    }
+    el.innerHTML = list.map(a => `
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;margin-bottom:6px;background:var(--card-bg);border:1px solid var(--border);border-radius:8px;">
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${a.filename}">${a.filename}</div>
+          <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">📦 ${a.order_count} 条订单 &nbsp;·&nbsp; ${a.created_at.slice(5,16).replace(' ',' ')} &nbsp;·&nbsp; ⏳ 剩余 ${a.remaining}</div>
+        </div>
+        <button onclick="downloadArchive(${a.id}, '${a.filename}')"
+          style="flex-shrink:0;background:var(--primary);color:#fff;border:none;border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer;white-space:nowrap;">
+          ⬇️ 下载
+        </button>
+      </div>
+    `).join('');
+  } catch(e) {
+    el.innerHTML = '<div style="color:var(--text-muted);font-size:13px;padding:12px 0;">加载失败，请检查服务连接</div>';
+  }
+}
+
+async function downloadArchive(id, filename) {
+  try {
+    const res = await fetch(`/api/archives/${id}/download`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showNotif(err.error || '下载失败', 'error'); return;
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showNotif('✅ 下载成功', 'success');
+  } catch(e) {
+    showNotif('下载失败，请检查服务连接', 'error');
+  }
 }
 
 // ======================== Samples ========================
