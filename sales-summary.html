@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>销售汇总 - 六亩园</title>
+<style>
+  :root {
+    --primary: #e5000e;
+    --primary-dark: #b8000b;
+    --primary-light: #ffeaea;
+    --accent: #ff6b35;
+    --bg: #f5f6fa;
+    --card: #ffffff;
+    --border: #e2e5ec;
+    --text: #1a1a2e;
+    --text-muted: #6b7280;
+    --success: #10b981;
+    --warning: #f59e0b;
+    --shadow: 0 2px 12px rgba(0,0,0,0.08);
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+  .header {
+    background: linear-gradient(135deg, var(--primary) 0%, #ff4444 100%);
+    color: white;
+    padding: 0 32px;
+    height: 64px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    box-shadow: 0 2px 16px rgba(229,0,14,0.3);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .header-logo {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+  }
+  .header-logo svg { width: 28px; height: 28px; }
+  .header-tag {
+    background: rgba(255,255,255,0.2);
+    padding: 4px 14px;
+    border-radius: 20px;
+    font-size: 13px;
+    font-weight: 500;
+    color: white;
+    text-decoration: none;
+    transition: background 0.2s;
+  }
+  .header-tag:hover { background: rgba(255,255,255,0.35); }
+  .container {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 28px 24px;
+  }
+  .card {
+    background: var(--card);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 28px;
+    margin-bottom: 24px;
+  }
+  .card-title {
+    font-size: 18px;
+    font-weight: 700;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .card-desc {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-bottom: 20px;
+  }
+  /* 上传区 */
+  .upload-zone {
+    border: 2px dashed var(--border);
+    border-radius: var(--radius);
+    padding: 48px 24px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.25s;
+    background: #fafbfc;
+  }
+  .upload-zone:hover, .upload-zone.dragover {
+    border-color: var(--primary);
+    background: var(--primary-light);
+  }
+  .upload-zone svg { width: 48px; height: 48px; color: var(--primary); margin-bottom: 12px; }
+  .upload-zone p { font-size: 15px; font-weight: 500; margin-bottom: 4px; }
+  .upload-zone span { font-size: 13px; color: var(--text-muted); }
+  #fileInput { display: none; }
+
+  /* 统计概览 */
+  .stats-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  .stat-box {
+    background: var(--card);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 20px;
+    text-align: center;
+  }
+  .stat-num {
+    font-size: 28px;
+    font-weight: 800;
+    color: var(--primary);
+    line-height: 1.2;
+  }
+  .stat-label {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 4px;
+  }
+
+  /* Tab */
+  .tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+  .tab-btn {
+    padding: 8px 20px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--card);
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    transition: all 0.2s;
+    color: var(--text-muted);
+  }
+  .tab-btn.active {
+    background: var(--primary);
+    color: white;
+    border-color: var(--primary);
+  }
+  .tab-btn:hover:not(.active) {
+    border-color: var(--primary);
+    color: var(--primary);
+  }
+
+  /* 表格 */
+  .data-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  .data-table th {
+    background: var(--primary);
+    color: white;
+    padding: 10px 12px;
+    text-align: left;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .data-table th:first-child { border-radius: 8px 0 0 0; }
+  .data-table th:last-child { border-radius: 0 8px 0 0; }
+  .data-table td {
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .data-table tr:hover td { background: #fff8f8; }
+  .data-table .sep-row td {
+    background: #fff3e0;
+    font-weight: 700;
+    text-align: center;
+    color: var(--accent);
+  }
+  .data-table .total-row td {
+    background: var(--primary-light);
+    font-weight: 700;
+  }
+  .data-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+  /* 按钮 */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 24px;
+    border-radius: 8px;
+    border: none;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    text-decoration: none;
+  }
+  .btn-primary {
+    background: var(--primary);
+    color: white;
+  }
+  .btn-primary:hover { background: var(--primary-dark); transform: translateY(-1px); }
+  .btn-primary:disabled { background: #ccc; cursor: not-allowed; transform: none; }
+  .btn-outline {
+    background: var(--card);
+    color: var(--primary);
+    border: 1px solid var(--primary);
+  }
+  .btn-outline:hover { background: var(--primary-light); }
+  .btn-row {
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+    margin-top: 20px;
+  }
+
+  /* 预览区 */
+  #previewArea { display: none; }
+  #loadingTip {
+    text-align: center;
+    padding: 40px;
+    color: var(--text-muted);
+    display: none;
+  }
+  .error-msg {
+    background: #fff5f5;
+    border: 1px solid #ffcdd2;
+    color: #c62828;
+    padding: 12px 16px;
+    border-radius: 8px;
+    font-size: 14px;
+    margin-top: 16px;
+    display: none;
+  }
+  .section-label {
+    font-size: 15px;
+    font-weight: 700;
+    margin: 20px 0 10px;
+    padding-left: 10px;
+    border-left: 4px solid var(--primary);
+  }
+  .empty-col { color: #ccc; font-style: italic; }
+
+  /* 模式切换器 */
+  .mode-selector {
+    display: flex;
+    gap: 0;
+    margin-bottom: 20px;
+    border-radius: 10px;
+    overflow: hidden;
+    border: 2px solid var(--primary);
+  }
+  .mode-btn {
+    flex: 1;
+    padding: 12px;
+    text-align: center;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 14px;
+    background: var(--card);
+    color: var(--text);
+    transition: all 0.2s;
+    user-select: none;
+  }
+  .mode-btn:hover { background: var(--primary-light); }
+  .mode-btn.active { background: var(--primary); color: white; }
+</style>
+</head>
+<body>
+
+<header class="header">
+  <div class="header-logo">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M3 3v18h18"/><path d="M7 14l4-4 4 4 6-6"/>
+    </svg>
+    销售汇总
+  </div>
+  <div style="display:flex;gap:10px;align-items:center;">
+    <a href="/" class="header-tag">🏠 订单录入</a>
+    <a href="/sf-export" class="header-tag">📊 导出分析</a>
+  </div>
+</header>
+
+<div class="container">
+
+  <!-- 模式切换器 -->
+  <div class="mode-selector">
+    <div class="mode-btn active" id="modeBtn1" onclick="switchMode(1)">模式一：商品名含规格</div>
+    <div class="mode-btn" id="modeBtn2" onclick="switchMode(2)">模式二：预订单位列含规格</div>
+  </div>
+
+  <!-- 上传卡片 -->
+  <div class="card" id="uploadCard">
+    <div class="card-title">📈 销售明细 → 汇总表</div>
+    <div class="card-desc">上传销售明细 Excel，自动按包装/散装分类、换算预计重量、生成品种汇总表</div>
+    <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+        <polyline points="17 8 12 3 7 8"/>
+        <line x1="12" y1="3" x2="12" y2="15"/>
+      </svg>
+      <p>点击或拖拽上传销售明细表</p>
+      <span>支持 .xlsx / .xls 格式</span>
+    </div>
+    <input type="file" id="fileInput" accept=".xlsx,.xls">
+    <div class="error-msg" id="errorMsg"></div>
+  </div>
+
+  <!-- 加载中 -->
+  <div id="loadingTip">
+    <div style="font-size:16px;margin-bottom:8px;">正在解析销售明细...</div>
+    <div style="font-size:13px;">分类、换算、汇总中</div>
+  </div>
+
+  <!-- 预览区 -->
+  <div id="previewArea">
+
+    <!-- 统计概览 -->
+    <div class="stats-row">
+      <div class="stat-box">
+        <div class="stat-num" id="statPackaged">0</div>
+        <div class="stat-label">包装商品种类</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-num" id="statBulk">0</div>
+        <div class="stat-label">散装商品种类</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-num" id="statVariety">0</div>
+        <div class="stat-label">品种汇总数</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-num" id="statTotal">0</div>
+        <div class="stat-label">预计总重量(斤)</div>
+      </div>
+    </div>
+
+    <!-- Tab -->
+    <div class="card">
+      <div class="tabs">
+        <div class="tab-btn active" onclick="switchTab('packaged')">📦 包装商品</div>
+        <div class="tab-btn" onclick="switchTab('bulk')">⚖️ 散装商品</div>
+        <div class="tab-btn" onclick="switchTab('variety')">📊 品种汇总</div>
+      </div>
+
+      <!-- 包装商品表 -->
+      <div id="tab-packaged" class="tab-content">
+        <table class="data-table">
+          <thead>
+            <tr><th style="width:50px">序号</th><th>商品名称</th><th style="width:90px">预订数量</th><th style="width:120px">预计重量(斤)</th></tr>
+          </thead>
+          <tbody id="packagedBody"></tbody>
+        </table>
+      </div>
+
+      <!-- 散装商品表 -->
+      <div id="tab-bulk" class="tab-content" style="display:none">
+        <table class="data-table">
+          <thead>
+            <tr><th style="width:50px">序号</th><th>商品名称</th><th style="width:90px">预订数量</th><th style="width:120px">预计重量(斤)</th></tr>
+          </thead>
+          <tbody id="bulkBody"></tbody>
+        </table>
+      </div>
+
+      <!-- 品种汇总表 -->
+      <div id="tab-variety" class="tab-content" style="display:none">
+        <table class="data-table">
+          <thead>
+            <tr><th style="width:50px">序号</th><th>品种</th><th style="width:130px">预计总重量(斤)</th><th style="width:130px">实际出库数量</th><th style="width:100px">剩余入库</th></tr>
+          </thead>
+          <tbody id="varietyBody"></tbody>
+        </table>
+      </div>
+
+      <div class="btn-row">
+        <button class="btn btn-outline" onclick="resetAll()">↻ 重新上传</button>
+        <button class="btn btn-primary" id="downloadBtn" onclick="downloadXlsx()">📥 下载汇总表 Excel</button>
+      </div>
+    </div>
+
+  </div>
+
+</div>
+
+<script>
+let currentData = null;
+let currentMode = 1;
+
+// 模式切换
+function switchMode(mode) {
+  currentMode = mode;
+  document.getElementById('modeBtn1').classList.toggle('active', mode === 1);
+  document.getElementById('modeBtn2').classList.toggle('active', mode === 2);
+  // 更新卡片描述
+  const desc = document.querySelector('#uploadCard .card-desc');
+  if (mode === 1) {
+    desc.textContent = '上传销售明细 Excel，自动按包装/散装分类、换算预计重量、生成品种汇总表';
+  } else {
+    desc.textContent = '上传销售明细 Excel，从预订单位列读取规格，按斤/g/箱分类换算、生成品种汇总表';
+  }
+  // 重置预览
+  resetAll();
+}
+
+// 拖拽上传
+const uploadZone = document.getElementById('uploadZone');
+const fileInput = document.getElementById('fileInput');
+
+uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('dragover'); });
+uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragover'));
+uploadZone.addEventListener('drop', e => {
+  e.preventDefault();
+  uploadZone.classList.remove('dragover');
+  if (e.dataTransfer.files.length) { fileInput.files = e.dataTransfer.files; handleFile(); }
+});
+fileInput.addEventListener('change', handleFile);
+
+function handleFile() {
+  if (!fileInput.files.length) return;
+  const file = fileInput.files[0];
+  const fname = file.name.toLowerCase();
+  if (!fname.endsWith('.xlsx') && !fname.endsWith('.xls')) {
+    showError('仅支持 .xlsx 或 .xls 格式');
+    return;
+  }
+  document.getElementById('errorMsg').style.display = 'none';
+  document.getElementById('loadingTip').style.display = 'block';
+  document.getElementById('previewArea').style.display = 'none';
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  const apiUrl = currentMode === 2 ? '/api/sales-summary-v2/parse' : '/api/sales-summary/parse';
+  fetch(apiUrl, { method: 'POST', body: formData })
+    .then(r => r.json())
+    .then(res => {
+      document.getElementById('loadingTip').style.display = 'none';
+      if (!res.success) {
+        showError(res.error || '解析失败');
+        return;
+      }
+      currentData = res.data;
+      renderPreview(res.data);
+    })
+    .catch(() => {
+      document.getElementById('loadingTip').style.display = 'none';
+      showError('网络错误，请重试');
+    });
+}
+
+function showError(msg) {
+  const el = document.getElementById('errorMsg');
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+
+function renderPreview(data) {
+  // 统计概览
+  document.getElementById('statPackaged').textContent = data.packaged_count;
+  document.getElementById('statBulk').textContent = data.bulk_count;
+  document.getElementById('statVariety').textContent = data.variety_count;
+  document.getElementById('statTotal').textContent = data.grand_total;
+
+  if (currentMode === 2) {
+    renderPreviewV2(data);
+  } else {
+    renderPreviewV1(data);
+  }
+  document.getElementById('previewArea').style.display = 'block';
+}
+
+// 模式一渲染（原有逻辑）
+function renderPreviewV1(data) {
+  // 包装表头
+  document.querySelector('#tab-packaged thead tr').innerHTML =
+    '<th style="width:50px">序号</th><th>商品名称</th><th style="width:90px">预订数量</th><th style="width:120px">预计重量(斤)</th>';
+  // 散装表头
+  document.querySelector('#tab-bulk thead tr').innerHTML =
+    '<th style="width:50px">序号</th><th>商品名称</th><th style="width:90px">预订数量</th><th style="width:120px">预计重量(斤)</th>';
+
+  // 包装商品
+  const pkgSorted = [...data.packaged].sort((a, b) => a.name.localeCompare(b.name, 'zh'));
+  let pkgHtml = '';
+  pkgSorted.forEach((p, i) => {
+    pkgHtml += `<tr><td>${i + 1}</td><td>${esc(p.name)}</td><td class="num">${p.qty}</td><td class="num">${p.total}</td></tr>`;
+  });
+  document.getElementById('packagedBody').innerHTML = pkgHtml;
+
+  // 散装商品
+  const bulkSorted = [...data.bulk].sort((a, b) => a.name.localeCompare(b.name, 'zh'));
+  let bulkHtml = '';
+  bulkSorted.forEach((b, i) => {
+    bulkHtml += `<tr><td>${i + 1}</td><td>${esc(b.name)}</td><td class="num">${b.qty}</td><td class="num">${b.total}</td></tr>`;
+  });
+  document.getElementById('bulkBody').innerHTML = bulkHtml;
+
+  // 品种汇总
+  let varHtml = '';
+  data.variety.forEach((v, i) => {
+    varHtml += `<tr><td>${i + 1}</td><td>${esc(v.name)}</td><td class="num">${v.total}</td><td class="num empty-col">待填写</td><td class="num empty-col">待填写</td></tr>`;
+  });
+  varHtml += `<tr class="total-row"><td colspan="2">合计</td><td class="num">${data.grand_total}</td><td></td><td></td></tr>`;
+  document.getElementById('varietyBody').innerHTML = varHtml;
+}
+
+// 模式二渲染（预订单位列含规格）
+function renderPreviewV2(data) {
+  // 包装表头（多一列"规格"）
+  document.querySelector('#tab-packaged thead tr').innerHTML =
+    '<th style="width:50px">序号</th><th>商品名称</th><th style="width:100px">规格</th><th style="width:80px">预订数量</th><th style="width:110px">预计重量(斤)</th>';
+  // 散装表头
+  document.querySelector('#tab-bulk thead tr').innerHTML =
+    '<th style="width:50px">序号</th><th>商品名称</th><th style="width:100px">规格</th><th style="width:80px">预订数量</th><th style="width:110px">预计重量(斤)</th>';
+
+  // 包装商品（按产品分组，rowspan合并序号和商品名）
+  let pkgHtml = '';
+  data.packaged.forEach((p, i) => {
+    const items = p.items;
+    const rowspan = items.length;
+    items.forEach((item, k) => {
+      let row = '<tr>';
+      if (k === 0) {
+        row += `<td rowspan="${rowspan}">${i + 1}</td>`;
+        row += `<td rowspan="${rowspan}">${esc(p.name)}</td>`;
+      }
+      row += `<td>${esc(item.spec)}</td><td class="num">${item.qty}</td><td class="num">${item.total}</td>`;
+      row += '</tr>';
+      pkgHtml += row;
+    });
+  });
+  document.getElementById('packagedBody').innerHTML = pkgHtml;
+
+  // 散装商品（多规格列）
+  let bulkHtml = '';
+  data.bulk.forEach((b, i) => {
+    bulkHtml += `<tr><td>${i + 1}</td><td>${esc(b.name)}</td><td>${esc(b.spec)}</td><td class="num">${b.qty}</td><td class="num">${b.total}</td></tr>`;
+  });
+  document.getElementById('bulkBody').innerHTML = bulkHtml;
+
+  // 品种汇总（与模式一相同）
+  let varHtml = '';
+  data.variety.forEach((v, i) => {
+    varHtml += `<tr><td>${i + 1}</td><td>${esc(v.name)}</td><td class="num">${v.total}</td><td class="num empty-col">待填写</td><td class="num empty-col">待填写</td></tr>`;
+  });
+  varHtml += `<tr class="total-row"><td colspan="2">合计</td><td class="num">${data.grand_total}</td><td></td><td></td></tr>`;
+  document.getElementById('varietyBody').innerHTML = varHtml;
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(c => c.style.display = 'none');
+  event.target.classList.add('active');
+  document.getElementById('tab-' + name).style.display = 'block';
+}
+
+function downloadXlsx() {
+  if (!currentData) return;
+  const btn = document.getElementById('downloadBtn');
+  btn.disabled = true;
+  btn.textContent = '⏳ 生成中...';
+
+  const dlUrl = currentMode === 2 ? '/api/sales-summary-v2/download' : '/api/sales-summary/download';
+  fetch(dlUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(currentData)
+  })
+    .then(r => {
+      if (!r.ok) throw new Error('下载失败');
+      return r.blob();
+    })
+    .then(blob => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `销售汇总_${new Date().toISOString().slice(0, 10)}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
+      btn.disabled = false;
+      btn.textContent = '📥 下载汇总表 Excel';
+    })
+    .catch(() => {
+      btn.disabled = false;
+      btn.textContent = '📥 下载汇总表 Excel';
+      showError('下载失败，请重试');
+    });
+}
+
+function resetAll() {
+  currentData = null;
+  fileInput.value = '';
+  document.getElementById('previewArea').style.display = 'none';
+  document.getElementById('errorMsg').style.display = 'none';
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+</script>
+
+</body>
+</html>

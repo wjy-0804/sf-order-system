@@ -3165,6 +3165,337 @@ def sales_summary_download():
         return jsonify({'success': False, 'error': f'生成失败: {str(e)}'}), 500
 
 
+# ======================== 销售汇总模式二（预订单位列含规格） ========================
+
+_V2_SPEC_RE = re.compile(r'(\d+(?:\.\d+)?)\s*(g|kg|斤)')
+
+
+def _convert_spec_v2(spec_str):
+    """从预订单位规格字符串转换为 (单位重量斤, 是否散装)。
+    "斤"        -> (1.0, True)   散装
+    "350g/份"   -> (0.7, False)  包装
+    "5斤/箱"    -> (5.0, False)  包装
+    "1kg/份"    -> (2.0, False)  包装
+    未知/空     -> (1.0, True)   默认散装
+    """
+    spec = (spec_str or '').strip()
+    if spec == '' or spec == '斤':
+        return 1.0, True
+    m = _V2_SPEC_RE.search(spec)
+    if not m:
+        return 1.0, True
+    num = float(m.group(1))
+    unit = m.group(2)
+    if unit == 'g':
+        return round(num / 500.0, 4), False
+    elif unit == 'kg':
+        return round(num * 2.0, 4), False
+    else:  # 斤（但不是纯"斤"，如"5斤/箱"）
+        return num, False
+
+
+def _parse_sales_detail_v2(file_stream):
+    """模式二解析：从预订单位列读取规格做分类。
+    输出: {date_range, packaged:[{name, items:[{spec,qty,unit_weight,total}]}],
+           bulk:[{name,spec,qty,total}], variety:[{name,total}],
+           grand_total, packaged_count, bulk_count, variety_count}
+    """
+    wb = openpyxl.load_workbook(file_stream, data_only=True)
+    ws = wb.worksheets[0]
+    rows = list(ws.iter_rows(values_only=True))
+
+    # 找表头行（含"商品名称"），同时定位各列
+    header_idx = None
+    col_name = col_qty = col_date = col_unit = None
+    for i, row in enumerate(rows):
+        cells = [str(c).strip() if c is not None else '' for c in row]
+        for j, c in enumerate(cells):
+            if '商品名称' in c:
+                header_idx = i
+                col_name = j
+            if '预订数量' in c or ('数量' in c and '预' in c):
+                col_qty = j
+            if '日期' in c:
+                col_date = j
+            if '预订单位' in c or c == '单位' or ('单位' in c and '预订' in c):
+                col_unit = j
+        if header_idx is not None:
+            break
+
+    if header_idx is None:
+        return {'error': '未找到表头（需含"商品名称"列）'}
+
+    # 按 (商品名称, 预订单位) 聚合预订数量
+    from collections import defaultdict, OrderedDict
+    agg = defaultdict(float)  # (name, spec) -> qty
+    dates = set()
+    for row in rows[header_idx + 1:]:
+        if col_name is not None and col_name < len(row) and row[col_name]:
+            name = str(row[col_name]).strip()
+            if not name or name == '配送费':
+                continue
+            spec = str(row[col_unit]).strip() if (col_unit is not None and col_unit < len(row) and row[col_unit]) else '斤'
+            qty = row[col_qty] if (col_qty is not None and col_qty < len(row) and isinstance(row[col_qty], (int, float))) else 0
+            agg[(name, spec)] += qty
+            if col_date is not None and col_date < len(row) and row[col_date]:
+                dates.add(str(row[col_date])[:10])
+
+    # 分类
+    packaged_map = OrderedDict()  # name -> [{spec, qty, unit_weight, total}]
+    bulk_list = []                # [{name, spec, qty, total}]
+    variety_map = defaultdict(float)
+
+    for (name, spec), qty in agg.items():
+        unit_w, is_bulk = _convert_spec_v2(spec)
+        total = round(qty * unit_w, 1)
+        variety_map[name] += total
+        if is_bulk:
+            bulk_list.append({'name': name, 'spec': spec, 'qty': qty, 'total': total})
+        else:
+            if name not in packaged_map:
+                packaged_map[name] = []
+            packaged_map[name].append({
+                'spec': spec, 'qty': qty, 'unit_weight': unit_w, 'total': total
+            })
+
+    # 构建 packaged 列表（按商品名排序，组内按规格排序）
+    packaged = []
+    for name in sorted(packaged_map.keys()):
+        items = sorted(packaged_map[name], key=lambda x: x['spec'])
+        packaged.append({'name': name, 'items': items})
+
+    # 散装按商品名排序
+    bulk_list.sort(key=lambda x: x['name'])
+
+    # 品种汇总（按重量降序）
+    variety = [{'name': k, 'total': round(v, 1)} for k, v in variety_map.items()]
+    variety.sort(key=lambda x: -x['total'])
+
+    date_range = ''
+    if dates:
+        ds = sorted(dates)
+        date_range = f'{ds[0]} 至 {ds[-1]}' if len(ds) > 1 else ds[0]
+
+    return {
+        'date_range': date_range,
+        'packaged': packaged,
+        'bulk': bulk_list,
+        'variety': variety,
+        'grand_total': round(sum(v['total'] for v in variety), 1),
+        'packaged_count': len(packaged),
+        'bulk_count': len(bulk_list),
+        'variety_count': len(variety),
+    }
+
+
+def _build_summary_xlsx_v2(data):
+    """模式二生成汇总表 xlsx：5列(含规格列)，包装区按产品分组共享序号。"""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = 'Sheet1'
+
+    date_range = data.get('date_range', '')
+    packaged = data.get('packaged', [])
+    bulk = data.get('bulk', [])
+    variety = data.get('variety', [])
+
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    from openpyxl.worksheet.page import PageMargins
+    from openpyxl.worksheet.properties import PageSetupProperties
+
+    bold = Font(bold=True)
+    bold_white = Font(bold=True, color='FFFFFF')
+    center = Alignment(horizontal='center', vertical='center')
+    left = Alignment(horizontal='left', vertical='center')
+    header_fill = PatternFill(start_color='E5000E', end_color='E5000E', fill_type='solid')
+    sep_fill = PatternFill(start_color='FFF3E0', end_color='FFF3E0', fill_type='solid')
+    total_fill = PatternFill(start_color='FFEAEA', end_color='FFEAEA', fill_type='solid')
+    thin = Side(style='thin', color='D0D0D0')
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    row_idx = 1
+
+    # Row1 标题
+    ws.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=5)
+    ws.cell(row=row_idx, column=1, value=f'商品销售明细汇总 ({date_range})' if date_range else '商品销售明细汇总')
+    ws.cell(row=row_idx, column=1).font = Font(bold=True, size=14)
+    ws.cell(row=row_idx, column=1).alignment = center
+    ws.row_dimensions[row_idx].height = 30
+    row_idx += 1
+
+    # Row2 一、按商品名称规格分类
+    ws.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=5)
+    ws.cell(row=row_idx, column=1, value='一、按商品名称规格分类').font = bold
+    ws.row_dimensions[row_idx].height = 20
+    row_idx += 1
+
+    # 表头
+    headers = ['序号', '商品名称', '规格', '预订数量', '预计重量(斤)']
+    for j, h in enumerate(headers, 1):
+        c = ws.cell(row=row_idx, column=j, value=h)
+        c.font = bold_white
+        c.fill = header_fill
+        c.alignment = center
+        c.border = border
+    ws.row_dimensions[row_idx].height = 22
+    row_idx += 1
+
+    # 包装商品（按产品分组，同产品共享序号）
+    seq = 1
+    for p in packaged:
+        items = p['items']
+        start_row = row_idx
+        for k, item in enumerate(items):
+            if k == 0:
+                ws.cell(row=row_idx, column=1, value=seq)
+                ws.cell(row=row_idx, column=2, value=p['name'])
+            # 后续行序号和商品名留空（视觉上属于同一组）
+            ws.cell(row=row_idx, column=3, value=item['spec'])
+            ws.cell(row=row_idx, column=4, value=item['qty'])
+            ws.cell(row=row_idx, column=5, value=item['total'])
+            for col in range(1, 6):
+                ws.cell(row=row_idx, column=col).border = border
+                ws.cell(row=row_idx, column=col).alignment = center if col != 2 else left
+            ws.row_dimensions[row_idx].height = 18
+            row_idx += 1
+        seq += 1
+
+    # 散装分隔行
+    ws.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=5)
+    sep_cell = ws.cell(row=row_idx, column=1, value='── 散装（按斤称重）──')
+    sep_cell.font = bold
+    sep_cell.fill = sep_fill
+    sep_cell.alignment = center
+    ws.row_dimensions[row_idx].height = 20
+    row_idx += 1
+
+    # 散装商品
+    bseq = 1
+    for b in bulk:
+        ws.cell(row=row_idx, column=1, value=bseq)
+        ws.cell(row=row_idx, column=2, value=b['name'])
+        ws.cell(row=row_idx, column=3, value=b['spec'])
+        ws.cell(row=row_idx, column=4, value=b['qty'])
+        ws.cell(row=row_idx, column=5, value=b['total'])
+        for col in range(1, 6):
+            ws.cell(row=row_idx, column=col).border = border
+            ws.cell(row=row_idx, column=col).alignment = center if col != 2 else left
+        ws.row_dimensions[row_idx].height = 18
+        row_idx += 1
+        bseq += 1
+
+    # 空行
+    row_idx += 1
+
+    # 二、各品种预计使用重量汇总
+    ws.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=6)
+    ws.cell(row=row_idx, column=1, value='二、各品种预计使用重量汇总').font = bold
+    ws.row_dimensions[row_idx].height = 20
+    row_idx += 1
+
+    # 表头
+    sum_headers = ['序号', '品种', '', '预计总重量(斤)', '实际出库数量', '剩余入库']
+    for j, h in enumerate(sum_headers, 1):
+        c = ws.cell(row=row_idx, column=j, value=h)
+        c.font = bold_white
+        c.fill = header_fill
+        c.alignment = center
+        c.border = border
+    ws.row_dimensions[row_idx].height = 22
+    row_idx += 1
+
+    # 品种数据
+    v_seq = 1
+    for v in variety:
+        ws.cell(row=row_idx, column=1, value=v_seq)
+        ws.cell(row=row_idx, column=2, value=v['name'])
+        ws.cell(row=row_idx, column=3, value='')
+        ws.cell(row=row_idx, column=4, value=v['total'])
+        ws.cell(row=row_idx, column=5, value='')  # 实际出库（空）
+        ws.cell(row=row_idx, column=6, value='')  # 剩余入库（空）
+        for col in range(1, 7):
+            ws.cell(row=row_idx, column=col).border = border
+            ws.cell(row=row_idx, column=col).alignment = center if col != 2 else left
+        ws.row_dimensions[row_idx].height = 18
+        row_idx += 1
+        v_seq += 1
+
+    # 合计行
+    ws.cell(row=row_idx, column=1, value='合计')
+    ws.cell(row=row_idx, column=4, value=data.get('grand_total', 0))
+    for j in range(1, 7):
+        ws.cell(row=row_idx, column=j).font = bold
+        ws.cell(row=row_idx, column=j).fill = total_fill
+        ws.cell(row=row_idx, column=j).border = border
+        ws.cell(row=row_idx, column=j).alignment = center
+    ws.row_dimensions[row_idx].height = 20
+
+    # 列宽
+    ws.column_dimensions['A'].width = 6
+    ws.column_dimensions['B'].width = 18
+    ws.column_dimensions['C'].width = 14
+    ws.column_dimensions['D'].width = 14
+    ws.column_dimensions['E'].width = 16
+    ws.column_dimensions['F'].width = 12
+
+    # A4 打印排版
+    ws.page_setup.paperSize = 9
+    ws.page_setup.orientation = 'portrait'
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+    ws.page_margins = PageMargins(left=0.5, right=0.5, top=0.6, bottom=0.6, header=0.3, footer=0.3)
+    ws.print_options.horizontalCentered = True
+    ws.oddFooter.center.text = "第 &P 页 / 共 &N 页"
+    ws.oddFooter.center.size = 9
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+@app.route('/api/sales-summary-v2/parse', methods=['POST'])
+@login_required
+def sales_summary_v2_parse():
+    """模式二：上传销售明细表，从预订单位列解析规格"""
+    if 'file' not in request.files:
+        return jsonify({'success': False, 'error': '请上传文件'}), 400
+    f = request.files['file']
+    if not f or not f.filename:
+        return jsonify({'success': False, 'error': '文件为空'}), 400
+    fname = f.filename.lower()
+    if not (fname.endswith('.xls') or fname.endswith('.xlsx')):
+        return jsonify({'success': False, 'error': '仅支持 .xls 或 .xlsx 格式'}), 400
+    try:
+        data = _parse_sales_detail_v2(f)
+        if 'error' in data:
+            return jsonify({'success': False, 'error': data['error']}), 400
+        return jsonify({'success': True, 'data': data})
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'解析失败: {str(e)}'}), 500
+
+
+@app.route('/api/sales-summary-v2/download', methods=['POST'])
+@login_required
+def sales_summary_v2_download():
+    """模式二：根据预览数据生成汇总表 xlsx 下载"""
+    data = request.json or {}
+    if not data:
+        return jsonify({'success': False, 'error': '无数据'}), 400
+    try:
+        buf = _build_summary_xlsx_v2(data)
+        date_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+        return send_file(
+            buf,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=f'销售汇总_{date_str}.xlsx'
+        )
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'生成失败: {str(e)}'}), 500
+
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5001))
     debug = os.environ.get('DEBUG', 'true').lower() == 'true'
