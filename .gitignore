@@ -1,10 +1,22 @@
+# 运行时数据（含客户订单信息，不提交）
+archives/
+stats/
+*.db
+orders.db
+sf-order-system.db
+
+# 日志
+*.log
+server.log
+/tmp/sf-order.*
+
+# Python 缓存
 __pycache__/
 *.pyc
+*.pyo
+.venv/
+venv/
+
+# 系统文件
 .DS_Store
-stats/
-Logs/
-*.log
-.env
-orders.db
-cloudflared*
-*.tgz
+Thumbs.db

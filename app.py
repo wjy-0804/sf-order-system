@@ -3340,16 +3340,16 @@ def _build_summary_xlsx_v2(data):
     ws.row_dimensions[row_idx].height = 22
     row_idx += 1
 
-    # 包装商品（按产品分组，同产品共享序号）
+    # 包装商品（按产品分组，同产品多规格合并序号和商品名单元格）
     seq = 1
     for p in packaged:
         items = p['items']
         start_row = row_idx
+        end_row = row_idx + len(items) - 1
         for k, item in enumerate(items):
-            if k == 0:
-                ws.cell(row=row_idx, column=1, value=seq)
-                ws.cell(row=row_idx, column=2, value=p['name'])
-            # 后续行序号和商品名留空（视觉上属于同一组）
+            # 只在首行写入序号和商品名，多行时后续合并单元格
+            ws.cell(row=row_idx, column=1, value=seq if k == 0 else None)
+            ws.cell(row=row_idx, column=2, value=p['name'] if k == 0 else None)
             ws.cell(row=row_idx, column=3, value=item['spec'])
             ws.cell(row=row_idx, column=4, value=item['qty'])
             ws.cell(row=row_idx, column=5, value=item['total'])
@@ -3358,6 +3358,13 @@ def _build_summary_xlsx_v2(data):
                 ws.cell(row=row_idx, column=col).alignment = center if col != 2 else left
             ws.row_dimensions[row_idx].height = 18
             row_idx += 1
+        # 同一商品多规格时合并序号、商品名单元格
+        if len(items) > 1:
+            ws.merge_cells(start_row=start_row, start_column=1, end_row=end_row, end_column=1)
+            ws.merge_cells(start_row=start_row, start_column=2, end_row=end_row, end_column=2)
+            # 合并后保持对齐（Excel 以左上角单元格格式为准）
+            ws.cell(row=start_row, column=1).alignment = center
+            ws.cell(row=start_row, column=2).alignment = left
         seq += 1
 
     # 散装分隔行
@@ -3491,6 +3498,274 @@ def sales_summary_v2_download():
             mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             as_attachment=True,
             download_name=f'销售汇总_{date_str}.xlsx'
+        )
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'生成失败: {str(e)}'}), 500
+
+
+# ======================== 销售汇总模式三（按客户分类汇总） ========================
+
+def _parse_sales_by_customer(file_stream):
+    """模式三解析：按客户(单位名称)分组汇总下单商品。
+    输入销售明细(日期/单位名称/商品名称/预订单位/预订数量/备注)，
+    输出 {date_range, customers:[{name, items:[{name, qty, unit, remark}]}],
+          customer_count, item_count}
+    同一客户下相同(商品名称+预订单位+备注)的记录合并数量。
+    """
+    wb = openpyxl.load_workbook(file_stream, data_only=True)
+    ws = wb.worksheets[0]
+    rows = list(ws.iter_rows(values_only=True))
+
+    # 找表头行（含"单位名称"或"商品名称"）
+    header_idx = None
+    col_cust = col_name = col_unit = col_qty = col_date = col_remark = None
+    for i, row in enumerate(rows):
+        cells = [str(c).strip() if c is not None else '' for c in row]
+        for j, c in enumerate(cells):
+            if '单位名称' in c or c == '客户' or c == '客户名称':
+                col_cust = j
+            if '商品名称' in c or c == '品名' or c == '商品':
+                col_name = j
+            if '预订单位' in c or c == '单位':
+                col_unit = j
+            if '预订数量' in c or c == '数量':
+                col_qty = j
+            if '日期' in c:
+                col_date = j
+            if c == '备注':
+                col_remark = j
+        if col_cust is not None and col_name is not None:
+            header_idx = i
+            break
+
+    if header_idx is None:
+        return {'error': '未找到表头（需含"单位名称"和"商品名称"列）'}
+
+    from collections import defaultdict, OrderedDict
+    # customer_name -> OrderedDict[(商品名,单位,备注)] -> qty
+    cust_map = OrderedDict()
+    cust_dates = {}  # customer_name -> set of date strings
+    all_dates = set()
+    for row in rows[header_idx + 1:]:
+        if col_cust is None or col_cust >= len(row) or not row[col_cust]:
+            continue
+        cust = str(row[col_cust]).strip()
+        if not cust:
+            continue
+        name = str(row[col_name]).strip() if (col_name is not None and col_name < len(row) and row[col_name]) else ''
+        if not name:
+            continue
+        unit = str(row[col_unit]).strip() if (col_unit is not None and col_unit < len(row) and row[col_unit]) else ''
+        qty = row[col_qty] if (col_qty is not None and col_qty < len(row) and isinstance(row[col_qty], (int, float))) else 0
+        remark = str(row[col_remark]).strip() if (col_remark is not None and col_remark < len(row) and row[col_remark]) else ''
+        if cust not in cust_map:
+            cust_map[cust] = OrderedDict()
+            cust_dates[cust] = set()
+        key = (name, unit, remark)
+        cust_map[cust][key] = cust_map[cust].get(key, 0) + qty
+        if col_date is not None and col_date < len(row) and row[col_date]:
+            ds = str(row[col_date])[:10]
+            cust_dates[cust].add(ds)
+            all_dates.add(ds)
+
+    customers = []
+    item_count = 0
+    for cust, items_map in cust_map.items():
+        items = []
+        for (name, unit, remark), qty in items_map.items():
+            items.append({'name': name, 'qty': qty, 'unit': unit, 'remark': remark})
+            item_count += 1
+        # 该客户实际下单日期
+        cust_date = ''
+        if cust in cust_dates and cust_dates[cust]:
+            ds = sorted(cust_dates[cust])
+            cust_date = f'{ds[0]} 至 {ds[-1]}' if len(ds) > 1 else ds[0]
+        customers.append({'name': cust, 'date': cust_date, 'items': items})
+
+    date_range = ''
+    if all_dates:
+        ds = sorted(all_dates)
+        date_range = f'{ds[0]} 至 {ds[-1]}' if len(ds) > 1 else ds[0]
+
+    return {
+        'date_range': date_range,
+        'customers': customers,
+        'customer_count': len(customers),
+        'item_count': item_count,
+    }
+
+
+def _build_customer_xlsx(data):
+    """模式三生成按客户分类汇总 xlsx。
+    每个客户一个区块：单位名称行 + 表头(序号/品名/数量/预订单位/备注) + 商品行 + 空行。
+    A4 纵向打印，智能分页：同一客户尽量不跨页，放不下时整体推到下一页。
+    """
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = '按客户汇总'
+
+    date_range = data.get('date_range', '')
+    customers = data.get('customers', [])
+
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    from openpyxl.worksheet.page import PageMargins
+    from openpyxl.worksheet.properties import PageSetupProperties
+    from openpyxl.worksheet.pagebreak import Break
+
+    bold = Font(bold=True)
+    bold_white = Font(bold=True, color='FFFFFF', size=11)
+    title_font = Font(bold=True, size=14)
+    cust_font = Font(bold=True, size=12, color='B8000B')
+    center = Alignment(horizontal='center', vertical='center')
+    left = Alignment(horizontal='left', vertical='center')
+    header_fill = PatternFill(start_color='E5000E', end_color='E5000E', fill_type='solid')
+    cust_fill = PatternFill(start_color='FFF3E0', end_color='FFF3E0', fill_type='solid')
+    thin = Side(style='thin', color='B0B0B0')
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    row_idx = 1
+
+    # 大标题
+    ws.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=5)
+    title = f'商品销售明细按客户汇总'
+    if date_range:
+        title += f' ({date_range})'
+    ws.cell(row=row_idx, column=1, value=title).font = title_font
+    ws.cell(row=row_idx, column=1).alignment = center
+    ws.row_dimensions[row_idx].height = 30
+    row_idx += 1
+
+    # 智能分页参数（按高度mm估算，A4纵向窄边距每页可用约255mm）
+    PAGE_USABLE_MM = 250.0
+    PT_TO_MM = 0.3528
+    used_mm = 30 * PT_TO_MM  # 大标题已占
+
+    for ci, cust in enumerate(customers):
+        items = cust['items']
+        # 区块行数与高度
+        block_rows = 1 + 1 + len(items) + 1  # 客户标题 + 表头 + 商品 + 空行
+        block_mm = (24 + 22 + len(items) * 18 + 8) * PT_TO_MM
+        # 若当前页放不下整个区块，且不是第一页起点，则插入分页符
+        if used_mm + block_mm > PAGE_USABLE_MM and used_mm > 30 * PT_TO_MM + 1:
+            ws.row_breaks.append(Break(id=row_idx - 1))
+            used_mm = 0.0
+
+        block_start = row_idx
+
+        # 客户标题行：A="单位名称"，B+C合并=客户名，D="日期"，E=日期值
+        ws.cell(row=row_idx, column=1, value='单位名称').font = bold
+        ws.cell(row=row_idx, column=1).alignment = center
+        ws.cell(row=row_idx, column=1).fill = cust_fill
+        ws.cell(row=row_idx, column=1).border = border
+        ws.merge_cells(start_row=row_idx, start_column=2, end_row=row_idx, end_column=3)
+        ws.cell(row=row_idx, column=2, value=cust['name']).font = cust_font
+        ws.cell(row=row_idx, column=2).alignment = center
+        ws.cell(row=row_idx, column=2).fill = cust_fill
+        for c in range(2, 4):
+            ws.cell(row=row_idx, column=c).border = border
+            ws.cell(row=row_idx, column=c).fill = cust_fill
+        # 右侧"日期"+该客户实际下单日期
+        ws.cell(row=row_idx, column=4, value='日期').font = bold
+        ws.cell(row=row_idx, column=4).alignment = center
+        ws.cell(row=row_idx, column=4).fill = cust_fill
+        ws.cell(row=row_idx, column=4).border = border
+        ws.cell(row=row_idx, column=5, value=cust.get('date', '')).font = bold
+        ws.cell(row=row_idx, column=5).alignment = center
+        ws.cell(row=row_idx, column=5).fill = cust_fill
+        ws.cell(row=row_idx, column=5).border = border
+        ws.row_dimensions[row_idx].height = 24
+        row_idx += 1
+
+        # 表头行
+        headers = ['商品明细', '品名', '数量', '预订单位', '备注']
+        for j, h in enumerate(headers, 1):
+            c = ws.cell(row=row_idx, column=j, value=h)
+            c.font = bold_white
+            c.fill = header_fill
+            c.alignment = center
+            c.border = border
+        ws.row_dimensions[row_idx].height = 22
+        row_idx += 1
+
+        # 商品行
+        for k, item in enumerate(items, 1):
+            ws.cell(row=row_idx, column=1, value=k)
+            ws.cell(row=row_idx, column=2, value=item['name'])
+            ws.cell(row=row_idx, column=3, value=item['qty'])
+            ws.cell(row=row_idx, column=4, value=item['unit'])
+            ws.cell(row=row_idx, column=5, value=item['remark'])
+            for col in range(1, 6):
+                ws.cell(row=row_idx, column=col).border = border
+                ws.cell(row=row_idx, column=col).alignment = center if col != 2 else left
+            ws.row_dimensions[row_idx].height = 18
+            row_idx += 1
+
+        # 空行分隔
+        ws.row_dimensions[row_idx].height = 8
+        row_idx += 1
+
+        used_mm += block_mm
+
+    # 列宽
+    ws.column_dimensions['A'].width = 8
+    ws.column_dimensions['B'].width = 30
+    ws.column_dimensions['C'].width = 8
+    ws.column_dimensions['D'].width = 12
+    ws.column_dimensions['E'].width = 16
+
+    # A4 打印排版
+    ws.page_setup.paperSize = 9
+    ws.page_setup.orientation = 'portrait'
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+    ws.page_margins = PageMargins(left=0.5, right=0.5, top=0.6, bottom=0.6, header=0.3, footer=0.3)
+    ws.print_options.horizontalCentered = True
+    ws.oddFooter.center.text = "第 &P 页 / 共 &N 页"
+    ws.oddFooter.center.size = 9
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+@app.route('/api/sales-by-customer/parse', methods=['POST'])
+@login_required
+def sales_by_customer_parse():
+    """模式三：上传销售明细表，按客户分组解析返回预览数据"""
+    if 'file' not in request.files:
+        return jsonify({'success': False, 'error': '请上传文件'}), 400
+    f = request.files['file']
+    if not f or not f.filename:
+        return jsonify({'success': False, 'error': '文件为空'}), 400
+    fname = f.filename.lower()
+    if not (fname.endswith('.xls') or fname.endswith('.xlsx')):
+        return jsonify({'success': False, 'error': '仅支持 .xls 或 .xlsx 格式'}), 400
+    try:
+        data = _parse_sales_by_customer(f)
+        if 'error' in data:
+            return jsonify({'success': False, 'error': data['error']}), 400
+        return jsonify({'success': True, 'data': data})
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'解析失败: {str(e)}'}), 500
+
+
+@app.route('/api/sales-by-customer/download', methods=['POST'])
+@login_required
+def sales_by_customer_download():
+    """模式三：根据预览数据生成按客户分类汇总 xlsx 下载"""
+    data = request.json or {}
+    if not data:
+        return jsonify({'success': False, 'error': '无数据'}), 400
+    try:
+        buf = _build_customer_xlsx(data)
+        date_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+        return send_file(
+            buf,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=f'按客户汇总_{date_str}.xlsx'
         )
     except Exception as e:
         return jsonify({'success': False, 'error': f'生成失败: {str(e)}'}), 500

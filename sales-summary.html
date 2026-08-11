@@ -296,6 +296,7 @@
   <div class="mode-selector">
     <div class="mode-btn active" id="modeBtn1" onclick="switchMode(1)">模式一：商品名含规格</div>
     <div class="mode-btn" id="modeBtn2" onclick="switchMode(2)">模式二：预订单位列含规格</div>
+    <div class="mode-btn" id="modeBtn3" onclick="switchMode(3)">模式三：按客户分类汇总</div>
   </div>
 
   <!-- 上传卡片 -->
@@ -401,12 +402,15 @@ function switchMode(mode) {
   currentMode = mode;
   document.getElementById('modeBtn1').classList.toggle('active', mode === 1);
   document.getElementById('modeBtn2').classList.toggle('active', mode === 2);
+  document.getElementById('modeBtn3').classList.toggle('active', mode === 3);
   // 更新卡片描述
   const desc = document.querySelector('#uploadCard .card-desc');
   if (mode === 1) {
     desc.textContent = '上传销售明细 Excel，自动按包装/散装分类、换算预计重量、生成品种汇总表';
-  } else {
+  } else if (mode === 2) {
     desc.textContent = '上传销售明细 Excel，从预订单位列读取规格，按斤/g/箱分类换算、生成品种汇总表';
+  } else {
+    desc.textContent = '上传销售明细 Excel，按客户(单位名称)分组汇总下单商品和数量，便于统计每个客户订单';
   }
   // 重置预览
   resetAll();
@@ -440,7 +444,9 @@ function handleFile() {
   const formData = new FormData();
   formData.append('file', file);
 
-  const apiUrl = currentMode === 2 ? '/api/sales-summary-v2/parse' : '/api/sales-summary/parse';
+  const apiUrl = currentMode === 3 ? '/api/sales-by-customer/parse'
+              : currentMode === 2 ? '/api/sales-summary-v2/parse'
+              : '/api/sales-summary/parse';
   fetch(apiUrl, { method: 'POST', body: formData })
     .then(r => r.json())
     .then(res => {
@@ -465,16 +471,31 @@ function showError(msg) {
 }
 
 function renderPreview(data) {
-  // 统计概览
-  document.getElementById('statPackaged').textContent = data.packaged_count;
-  document.getElementById('statBulk').textContent = data.bulk_count;
-  document.getElementById('statVariety').textContent = data.variety_count;
-  document.getElementById('statTotal').textContent = data.grand_total;
-
-  if (currentMode === 2) {
-    renderPreviewV2(data);
+  if (currentMode === 3) {
+    // 模式三统计：客户数 / 商品条数
+    document.getElementById('statPackaged').textContent = data.customer_count;
+    document.querySelector('#statPackaged').nextElementSibling.textContent = '客户数量';
+    document.getElementById('statBulk').textContent = data.item_count;
+    document.querySelector('#statBulk').nextElementSibling.textContent = '商品总条数';
+    document.getElementById('statVariety').parentElement.style.display = 'none';
+    document.getElementById('statTotal').parentElement.style.display = 'none';
+    renderPreviewV3(data);
   } else {
-    renderPreviewV1(data);
+    document.querySelector('#statPackaged').nextElementSibling.textContent = '包装商品种类';
+    document.querySelector('#statBulk').nextElementSibling.textContent = '散装商品种类';
+    document.getElementById('statVariety').parentElement.style.display = '';
+    document.getElementById('statTotal').parentElement.style.display = '';
+    document.querySelector('.tabs').style.display = '';
+    document.querySelector('#tab-packaged thead').style.display = '';
+    document.getElementById('statPackaged').textContent = data.packaged_count;
+    document.getElementById('statBulk').textContent = data.bulk_count;
+    document.getElementById('statVariety').textContent = data.variety_count;
+    document.getElementById('statTotal').textContent = data.grand_total;
+    if (currentMode === 2) {
+      renderPreviewV2(data);
+    } else {
+      renderPreviewV1(data);
+    }
   }
   document.getElementById('previewArea').style.display = 'block';
 }
@@ -556,6 +577,30 @@ function renderPreviewV2(data) {
   document.getElementById('varietyBody').innerHTML = varHtml;
 }
 
+function renderPreviewV3(data) {
+  // 模式三：隐藏 tab 按钮，只显示包装区(作为客户分块容器)
+  document.querySelector('.tabs').style.display = 'none';
+  document.getElementById('tab-bulk').style.display = 'none';
+  document.getElementById('tab-variety').style.display = 'none';
+  document.getElementById('tab-packaged').style.display = 'block';
+
+  let html = '';
+  data.customers.forEach((cust, ci) => {
+    html += '<div style="margin-bottom:24px;">';
+    html += `<div style="background:#fff3e0;padding:8px 14px;border-radius:8px 8px 0 0;font-size:15px;font-weight:700;color:#b8000b;border:1px solid #ffe0b2;border-bottom:none;">单位名称：${esc(cust.name)} <span style="float:right;color:#444;font-weight:600;">日期：${esc(cust.date || '')}</span></div>`;
+    html += '<table class="data-table" style="border-radius:0 0 8px 8px;overflow:hidden;"><thead><tr>';
+    html += '<th style="width:50px">商品明细</th><th>品名</th><th style="width:70px">数量</th><th style="width:100px">预订单位</th><th style="width:120px">备注</th>';
+    html += '</tr></thead><tbody>';
+    cust.items.forEach((item, k) => {
+      html += `<tr><td>${k + 1}</td><td>${esc(item.name)}</td><td class="num">${item.qty}</td><td>${esc(item.unit)}</td><td>${esc(item.remark)}</td></tr>`;
+    });
+    html += '</tbody></table></div>';
+  });
+  document.getElementById('packagedBody').innerHTML = html;
+  // 包装表头行隐藏（模式三自带表头）
+  document.querySelector('#tab-packaged thead').style.display = 'none';
+}
+
 function switchTab(name) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.querySelectorAll('.tab-content').forEach(c => c.style.display = 'none');
@@ -569,7 +614,9 @@ function downloadXlsx() {
   btn.disabled = true;
   btn.textContent = '⏳ 生成中...';
 
-  const dlUrl = currentMode === 2 ? '/api/sales-summary-v2/download' : '/api/sales-summary/download';
+  const dlUrl = currentMode === 3 ? '/api/sales-by-customer/download'
+              : currentMode === 2 ? '/api/sales-summary-v2/download'
+              : '/api/sales-summary/download';
   fetch(dlUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
