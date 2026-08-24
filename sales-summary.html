@@ -497,10 +497,10 @@ function renderPreview(data) {
 function renderPreviewV2(data) {
   // 包装表头（多一列"规格"）
   document.querySelector('#tab-packaged thead tr').innerHTML =
-    '<th style="width:50px">序号</th><th>商品名称</th><th style="width:100px">规格</th><th style="width:80px">预订数量</th><th style="width:110px">预计重量(斤)</th>';
-  // 散装表头
+    '<th style="width:50px">序号</th><th>商品名称</th><th style="width:100px">规格</th><th style="width:80px">预订数量</th><th style="width:110px">包装勾选标记</th>';
+  // 散装表头（多一列"来源"）
   document.querySelector('#tab-bulk thead tr').innerHTML =
-    '<th style="width:50px">序号</th><th>商品名称</th><th style="width:100px">规格</th><th style="width:80px">预订数量</th><th style="width:110px">预计重量(斤)</th>';
+    '<th style="width:50px">序号</th><th>商品名称</th><th style="width:100px">规格</th><th style="width:80px">预订数量</th><th style="width:110px">包装勾选标记</th><th style="width:160px">来源</th>';
 
   // 包装商品（按产品分组，rowspan合并序号和商品名）
   let pkgHtml = '';
@@ -513,17 +513,29 @@ function renderPreviewV2(data) {
         row += `<td rowspan="${rowspan}">${i + 1}</td>`;
         row += `<td rowspan="${rowspan}">${esc(p.name)}</td>`;
       }
-      row += `<td>${esc(item.spec)}</td><td class="num">${item.qty}</td><td class="num">${item.total}</td>`;
+      row += `<td>${esc(item.spec)}</td><td class="num">${item.qty}</td><td class="num empty-col">—</td>`;
       row += '</tr>';
       pkgHtml += row;
     });
   });
   document.getElementById('packagedBody').innerHTML = pkgHtml;
 
-  // 散装商品（多规格列）
+  // 散装商品（按来源拆行，序号/商品名/规格列合并）
   let bulkHtml = '';
   data.bulk.forEach((b, i) => {
-    bulkHtml += `<tr><td>${i + 1}</td><td>${esc(b.name)}</td><td>${esc(b.spec)}</td><td class="num">${b.qty}</td><td class="num">${b.total}</td></tr>`;
+    const sources = b.sources && b.sources.length ? b.sources : [{customer:'', qty:0}];
+    const rowspan = sources.length;
+    sources.forEach((s, k) => {
+      let row = '<tr>';
+      if (k === 0) {
+        row += `<td rowspan="${rowspan}">${i + 1}</td>`;
+        row += `<td rowspan="${rowspan}">${esc(b.name)}</td>`;
+        row += `<td rowspan="${rowspan}">${esc(b.spec)}</td>`;
+      }
+      row += `<td class="num">${s.qty}</td><td class="num empty-col">—</td><td>${esc(s.customer)}</td>`;
+      row += '</tr>';
+      bulkHtml += row;
+    });
   });
   document.getElementById('bulkBody').innerHTML = bulkHtml;
 

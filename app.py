@@ -2993,7 +2993,7 @@ def _parse_sales_detail_v2(file_stream):
 
     # 找表头行（含"商品名称"），同时定位各列
     header_idx = None
-    col_name = col_qty = col_date = col_unit = None
+    col_name = col_qty = col_date = col_unit = col_customer = None
     for i, row in enumerate(rows):
         cells = [str(c).strip() if c is not None else '' for c in row]
         for j, c in enumerate(cells):
@@ -3006,15 +3006,20 @@ def _parse_sales_detail_v2(file_stream):
                 col_date = j
             if '预订单位' in c or c == '单位' or ('单位' in c and '预订' in c):
                 col_unit = j
+            if '单位名称' in c or c == '客户' or ('单位' in c and '名称' in c):
+                col_customer = j
         if header_idx is not None:
             break
 
     if header_idx is None:
         return {'error': '未找到表头（需含"商品名称"列）'}
 
-    # 按 (商品名称, 预订单位) 聚合预订数量
+    # 聚合：包装按 (商品名, 规格)，散装按 商品名 -> 客户 -> 斤数（保留来源明细）
     from collections import defaultdict, OrderedDict
-    agg = defaultdict(float)  # (name, spec) -> qty
+    agg_packaged = defaultdict(float)   # (name, spec) -> qty
+    agg_bulk = defaultdict(lambda: defaultdict(float))  # name -> {customer -> qty}
+    bulk_units = {}  # name -> 原预订单位（用于散装规格显示，如"斤"/"盒"）
+    variety_map = defaultdict(float)
     dates = set()
     for row in rows[header_idx + 1:]:
         if col_name is not None and col_name < len(row) and row[col_name]:
@@ -3023,27 +3028,61 @@ def _parse_sales_detail_v2(file_stream):
                 continue
             spec = str(row[col_unit]).strip() if (col_unit is not None and col_unit < len(row) and row[col_unit]) else '斤'
             qty = row[col_qty] if (col_qty is not None and col_qty < len(row) and isinstance(row[col_qty], (int, float))) else 0
-            agg[(name, spec)] += qty
+            customer = ''
+            if col_customer is not None and col_customer < len(row) and row[col_customer]:
+                customer = str(row[col_customer]).strip()
+            unit_w, is_bulk = _convert_spec_v2(spec)
+            if is_bulk and spec != '斤':
+                # 单位无重量信息（如"包"/"盒"）：尝试从商品名提取规格换算（如"有机上海青350g/包"）
+                m = _V2_SPEC_RE.search(name)
+                if m:
+                    num = float(m.group(1))
+                    u = m.group(2)
+                    if u == 'g':
+                        unit_w = round(num / 500.0, 4)
+                    elif u == 'kg':
+                        unit_w = round(num * 2.0, 4)
+                    else:
+                        unit_w = num
+                    is_bulk = False
+            variety_map[name] += round(qty * unit_w, 1)
+            if is_bulk:
+                agg_bulk[name][customer] += qty
+                bulk_units[name] = spec
+            else:
+                agg_packaged[(name, spec)] += qty
             if col_date is not None and col_date < len(row) and row[col_date]:
                 dates.add(str(row[col_date])[:10])
 
-    # 分类
+    # 包装分类
     packaged_map = OrderedDict()  # name -> [{spec, qty, unit_weight, total}]
-    bulk_list = []                # [{name, spec, qty, total}]
-    variety_map = defaultdict(float)
+    for (name, spec), qty in agg_packaged.items():
+        unit_w, _ = _convert_spec_v2(spec)
+        if unit_w == 1.0:
+            # 预订单位无重量信息（如"包"）：与解析时一致，从商品名提取规格换算
+            m = _V2_SPEC_RE.search(name)
+            if m:
+                num = float(m.group(1))
+                u = m.group(2)
+                if u == 'g':
+                    unit_w = round(num / 500.0, 4)
+                elif u == 'kg':
+                    unit_w = round(num * 2.0, 4)
+                else:
+                    unit_w = num
+        if name not in packaged_map:
+            packaged_map[name] = []
+        packaged_map[name].append({
+            'spec': spec, 'qty': qty, 'unit_weight': unit_w,
+            'total': round(qty * unit_w, 1)
+        })
 
-    for (name, spec), qty in agg.items():
-        unit_w, is_bulk = _convert_spec_v2(spec)
-        total = round(qty * unit_w, 1)
-        variety_map[name] += total
-        if is_bulk:
-            bulk_list.append({'name': name, 'spec': spec, 'qty': qty, 'total': total})
-        else:
-            if name not in packaged_map:
-                packaged_map[name] = []
-            packaged_map[name].append({
-                'spec': spec, 'qty': qty, 'unit_weight': unit_w, 'total': total
-            })
+    # 散装：每个商品按客户做明细（保留来源）
+    bulk_list = []
+    for name, cust_map in agg_bulk.items():
+        sources = [{'customer': c, 'qty': q} for c, q in cust_map.items()]
+        sources.sort(key=lambda x: x['customer'])
+        bulk_list.append({'name': name, 'spec': bulk_units.get(name, '斤'), 'sources': sources})
 
     # 构建 packaged 列表（按商品名排序，组内按规格排序）
     packaged = []
@@ -3103,7 +3142,7 @@ def _build_summary_xlsx_v2(data):
     row_idx = 1
 
     # Row1 标题
-    ws.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=5)
+    ws.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=7)
     ws.cell(row=row_idx, column=1, value=f'商品销售明细汇总 ({date_range})' if date_range else '商品销售明细汇总')
     ws.cell(row=row_idx, column=1).font = Font(bold=True, size=14)
     ws.cell(row=row_idx, column=1).alignment = center
@@ -3117,7 +3156,7 @@ def _build_summary_xlsx_v2(data):
     row_idx += 1
 
     # 表头
-    headers = ['序号', '商品名称', '规格', '预订数量', '预计重量(斤)']
+    headers = ['序号', '商品名称', '规格', '预订数量', '包装勾选标记']
     for j, h in enumerate(headers, 1):
         c = ws.cell(row=row_idx, column=j, value=h)
         c.font = bold_white
@@ -3139,7 +3178,7 @@ def _build_summary_xlsx_v2(data):
             ws.cell(row=row_idx, column=2, value=p['name'] if k == 0 else None)
             ws.cell(row=row_idx, column=3, value=item['spec'])
             ws.cell(row=row_idx, column=4, value=item['qty'])
-            ws.cell(row=row_idx, column=5, value=item['total'])
+            ws.cell(row=row_idx, column=5, value='')  # 包装勾选标记（预留手工勾选）
             for col in range(1, 6):
                 ws.cell(row=row_idx, column=col).border = border
                 ws.cell(row=row_idx, column=col).alignment = center if col != 2 else left
@@ -3155,7 +3194,7 @@ def _build_summary_xlsx_v2(data):
         seq += 1
 
     # 散装分隔行
-    ws.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=5)
+    ws.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=6)
     sep_cell = ws.cell(row=row_idx, column=1, value='── 散装（按斤称重）──')
     sep_cell.font = bold
     sep_cell.fill = sep_fill
@@ -3163,19 +3202,42 @@ def _build_summary_xlsx_v2(data):
     ws.row_dimensions[row_idx].height = 20
     row_idx += 1
 
-    # 散装商品
+    # 散装表头（6列，比包装多一列"来源"）
+    bulk_headers = ['序号', '商品名称', '规格', '预订数量', '包装勾选标记', '来源']
+    for j, h in enumerate(bulk_headers, 1):
+        c = ws.cell(row=row_idx, column=j, value=h)
+        c.font = bold_white
+        c.fill = header_fill
+        c.alignment = center
+        c.border = border
+    ws.row_dimensions[row_idx].height = 22
+    row_idx += 1
+
+    # 散装商品（每个商品按来源拆多行，序号/商品名/规格列垂直合并）
     bseq = 1
     for b in bulk:
-        ws.cell(row=row_idx, column=1, value=bseq)
-        ws.cell(row=row_idx, column=2, value=b['name'])
-        ws.cell(row=row_idx, column=3, value=b['spec'])
-        ws.cell(row=row_idx, column=4, value=b['qty'])
-        ws.cell(row=row_idx, column=5, value=b['total'])
-        for col in range(1, 6):
-            ws.cell(row=row_idx, column=col).border = border
-            ws.cell(row=row_idx, column=col).alignment = center if col != 2 else left
-        ws.row_dimensions[row_idx].height = 18
-        row_idx += 1
+        sources = b.get('sources') or [{'customer': '', 'qty': 0}]
+        start_row = row_idx
+        end_row = row_idx + len(sources) - 1
+        for k, src in enumerate(sources):
+            ws.cell(row=row_idx, column=1, value=bseq if k == 0 else None)
+            ws.cell(row=row_idx, column=2, value=b['name'] if k == 0 else None)
+            ws.cell(row=row_idx, column=3, value=b['spec'] if k == 0 else None)
+            ws.cell(row=row_idx, column=4, value=src['qty'])
+            ws.cell(row=row_idx, column=5, value='')  # 包装勾选标记
+            ws.cell(row=row_idx, column=6, value=src['customer'])
+            for col in range(1, 7):
+                ws.cell(row=row_idx, column=col).border = border
+                ws.cell(row=row_idx, column=col).alignment = center if col != 2 else left
+            ws.row_dimensions[row_idx].height = 18
+            row_idx += 1
+        if len(sources) > 1:
+            ws.merge_cells(start_row=start_row, start_column=1, end_row=end_row, end_column=1)
+            ws.merge_cells(start_row=start_row, start_column=2, end_row=end_row, end_column=2)
+            ws.merge_cells(start_row=start_row, start_column=3, end_row=end_row, end_column=3)
+            ws.cell(row=start_row, column=1).alignment = center
+            ws.cell(row=start_row, column=2).alignment = left
+            ws.cell(row=start_row, column=3).alignment = center
         bseq += 1
 
     # 空行
@@ -3231,7 +3293,7 @@ def _build_summary_xlsx_v2(data):
     ws.column_dimensions['C'].width = 14
     ws.column_dimensions['D'].width = 14
     ws.column_dimensions['E'].width = 16
-    ws.column_dimensions['F'].width = 12
+    ws.column_dimensions['F'].width = 18
     ws.column_dimensions['G'].width = 12
 
     # A4 打印排版
