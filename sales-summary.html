@@ -294,8 +294,7 @@
 
   <!-- 模式切换器 -->
   <div class="mode-selector">
-    <div class="mode-btn active" id="modeBtn1" onclick="switchMode(1)">模式一：商品名含规格</div>
-    <div class="mode-btn" id="modeBtn2" onclick="switchMode(2)">模式二：预订单位列含规格</div>
+    <div class="mode-btn active" id="modeBtn2" onclick="switchMode(2)">模式二：预订单位列含规格</div>
     <div class="mode-btn" id="modeBtn3" onclick="switchMode(3)">模式三：按客户分类汇总</div>
   </div>
 
@@ -377,7 +376,7 @@
       <div id="tab-variety" class="tab-content" style="display:none">
         <table class="data-table">
           <thead>
-            <tr><th style="width:50px">序号</th><th>品种</th><th style="width:130px">预计总重量(斤)</th><th style="width:130px">实际出库数量</th><th style="width:100px">剩余入库</th></tr>
+            <tr><th style="width:50px">序号</th><th>品种</th><th style="width:130px">预计总重量(斤)</th><th style="width:130px">实际出库数量</th><th style="width:100px">剩余入库</th><th style="width:100px">损耗</th></tr>
           </thead>
           <tbody id="varietyBody"></tbody>
         </table>
@@ -395,19 +394,16 @@
 
 <script>
 let currentData = null;
-let currentMode = 1;
+let currentMode = 2;
 
 // 模式切换
 function switchMode(mode) {
   currentMode = mode;
-  document.getElementById('modeBtn1').classList.toggle('active', mode === 1);
   document.getElementById('modeBtn2').classList.toggle('active', mode === 2);
   document.getElementById('modeBtn3').classList.toggle('active', mode === 3);
   // 更新卡片描述
   const desc = document.querySelector('#uploadCard .card-desc');
-  if (mode === 1) {
-    desc.textContent = '上传销售明细 Excel，自动按包装/散装分类、换算预计重量、生成品种汇总表';
-  } else if (mode === 2) {
+  if (mode === 2) {
     desc.textContent = '上传销售明细 Excel，从预订单位列读取规格，按斤/g/箱分类换算、生成品种汇总表';
   } else {
     desc.textContent = '上传销售明细 Excel，按客户(单位名称)分组汇总下单商品和数量，便于统计每个客户订单';
@@ -445,8 +441,7 @@ function handleFile() {
   formData.append('file', file);
 
   const apiUrl = currentMode === 3 ? '/api/sales-by-customer/parse'
-              : currentMode === 2 ? '/api/sales-summary-v2/parse'
-              : '/api/sales-summary/parse';
+              : '/api/sales-summary-v2/parse';
   fetch(apiUrl, { method: 'POST', body: formData })
     .then(r => r.json())
     .then(res => {
@@ -493,45 +488,9 @@ function renderPreview(data) {
     document.getElementById('statTotal').textContent = data.grand_total;
     if (currentMode === 2) {
       renderPreviewV2(data);
-    } else {
-      renderPreviewV1(data);
     }
   }
   document.getElementById('previewArea').style.display = 'block';
-}
-
-// 模式一渲染（原有逻辑）
-function renderPreviewV1(data) {
-  // 包装表头
-  document.querySelector('#tab-packaged thead tr').innerHTML =
-    '<th style="width:50px">序号</th><th>商品名称</th><th style="width:90px">预订数量</th><th style="width:120px">预计重量(斤)</th>';
-  // 散装表头
-  document.querySelector('#tab-bulk thead tr').innerHTML =
-    '<th style="width:50px">序号</th><th>商品名称</th><th style="width:90px">预订数量</th><th style="width:120px">预计重量(斤)</th>';
-
-  // 包装商品
-  const pkgSorted = [...data.packaged].sort((a, b) => a.name.localeCompare(b.name, 'zh'));
-  let pkgHtml = '';
-  pkgSorted.forEach((p, i) => {
-    pkgHtml += `<tr><td>${i + 1}</td><td>${esc(p.name)}</td><td class="num">${p.qty}</td><td class="num">${p.total}</td></tr>`;
-  });
-  document.getElementById('packagedBody').innerHTML = pkgHtml;
-
-  // 散装商品
-  const bulkSorted = [...data.bulk].sort((a, b) => a.name.localeCompare(b.name, 'zh'));
-  let bulkHtml = '';
-  bulkSorted.forEach((b, i) => {
-    bulkHtml += `<tr><td>${i + 1}</td><td>${esc(b.name)}</td><td class="num">${b.qty}</td><td class="num">${b.total}</td></tr>`;
-  });
-  document.getElementById('bulkBody').innerHTML = bulkHtml;
-
-  // 品种汇总
-  let varHtml = '';
-  data.variety.forEach((v, i) => {
-    varHtml += `<tr><td>${i + 1}</td><td>${esc(v.name)}</td><td class="num">${v.total}</td><td class="num empty-col">待填写</td><td class="num empty-col">待填写</td></tr>`;
-  });
-  varHtml += `<tr class="total-row"><td colspan="2">合计</td><td class="num">${data.grand_total}</td><td></td><td></td></tr>`;
-  document.getElementById('varietyBody').innerHTML = varHtml;
 }
 
 // 模式二渲染（预订单位列含规格）
@@ -568,12 +527,12 @@ function renderPreviewV2(data) {
   });
   document.getElementById('bulkBody').innerHTML = bulkHtml;
 
-  // 品种汇总（与模式一相同）
+  // 品种汇总
   let varHtml = '';
   data.variety.forEach((v, i) => {
-    varHtml += `<tr><td>${i + 1}</td><td>${esc(v.name)}</td><td class="num">${v.total}</td><td class="num empty-col">待填写</td><td class="num empty-col">待填写</td></tr>`;
+    varHtml += `<tr><td>${i + 1}</td><td>${esc(v.name)}</td><td class="num">${v.total}</td><td class="num empty-col">待填写</td><td class="num empty-col">待填写</td><td class="num empty-col">待填写</td></tr>`;
   });
-  varHtml += `<tr class="total-row"><td colspan="2">合计</td><td class="num">${data.grand_total}</td><td></td><td></td></tr>`;
+  varHtml += `<tr class="total-row"><td colspan="2">合计</td><td class="num">${data.grand_total}</td><td></td><td></td><td></td></tr>`;
   document.getElementById('varietyBody').innerHTML = varHtml;
 }
 
@@ -594,6 +553,7 @@ function renderPreviewV3(data) {
     cust.items.forEach((item, k) => {
       html += `<tr><td>${k + 1}</td><td>${esc(item.name)}</td><td class="num">${item.qty}</td><td>${esc(item.unit)}</td><td>${esc(item.remark)}</td></tr>`;
     });
+    html += '<tr class="total-row"><td>总件数</td><td></td><td></td><td></td><td></td></tr>';
     html += '</tbody></table></div>';
   });
   document.getElementById('packagedBody').innerHTML = html;
@@ -615,8 +575,7 @@ function downloadXlsx() {
   btn.textContent = '⏳ 生成中...';
 
   const dlUrl = currentMode === 3 ? '/api/sales-by-customer/download'
-              : currentMode === 2 ? '/api/sales-summary-v2/download'
-              : '/api/sales-summary/download';
+              : '/api/sales-summary-v2/download';
   fetch(dlUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
