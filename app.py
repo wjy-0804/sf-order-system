@@ -12,7 +12,6 @@ import copy
 import csv
 import tempfile
 import glob
-import sqlite3
 import functools
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, send_file, session, redirect, url_for
@@ -22,21 +21,89 @@ import xlrd  # 支持读取旧版 .xls 文件
 from openpyxl import load_workbook
 
 app = Flask(__name__, static_folder='.', static_url_path='')
-app.secret_key = 'sf-order-system-2026-secret-key'
+app.secret_key = os.environ.get('SECRET_KEY', 'sf-order-system-2026-secret-key')
 
-# ======================== 数据库初始化 ========================
+# ======================== 数据库初始化（双后端：SQLite 本地 / PostgreSQL 生产） ========================
+DB_URL = os.environ.get('DATABASE_URL', '').strip()
+USE_PG = bool(DB_URL and DB_URL.startswith('postgres'))
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'orders.db')
 
-def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+if USE_PG:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor, RealDictRow
+
+    class _Cursor:
+        """psycopg2 cursor 包装：自动把 ? 占位符转 %s；INSERT 自动追加 RETURNING id 以模拟 lastrowid"""
+        def __init__(self, real_cur):
+            self._c = real_cur
+            self._lastrowid = None
+        def execute(self, sql, params=None):
+            s = sql.replace('?', '%s')
+            if s.lstrip().upper().startswith('INSERT') and 'RETURNING' not in s.upper():
+                s = s.rstrip().rstrip(';') + ' RETURNING id'
+                self._c.execute(s, params if params is not None else ())
+                try:
+                    row = self._c.fetchone()
+                    if row is not None:
+                        self._lastrowid = row['id'] if isinstance(row, RealDictRow) else row[0]
+                except Exception:
+                    self._lastrowid = None
+            else:
+                self._c.execute(s, params if params is not None else ())
+        def fetchone(self):
+            return self._c.fetchone()
+        def fetchall(self):
+            return self._c.fetchall()
+        def close(self):
+            return self._c.close()
+        @property
+        def lastrowid(self):
+            return self._lastrowid
+        def __getattr__(self, name):
+            return getattr(self._c, name)
+
+    class _Conn:
+        """连接包装：cursor() 返回 _Cursor，commit/close 透传"""
+        def __init__(self, real_conn):
+            self._c = real_conn
+        def cursor(self):
+            return _Cursor(self._c.cursor())
+        def commit(self):
+            return self._c.commit()
+        def close(self):
+            return self._c.close()
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            self.close()
+        def __getattr__(self, name):
+            return getattr(self._c, name)
+
+    def get_db():
+        conn = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
+        return _Conn(conn)
+
+    _OP_ERR = psycopg2.Error
+    _PK = 'SERIAL PRIMARY KEY'        # PostgreSQL 自增主键
+else:
+    import sqlite3
+    _OP_ERR = sqlite3.OperationalError
+    _PK = 'INTEGER PRIMARY KEY AUTOINCREMENT'
+
+    def get_db():
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+def _ddl(sql):
+    """建表 SQL 自适应主键语法：SQLite 用 AUTOINCREMENT，PostgreSQL 用 SERIAL"""
+    return sql.replace('INTEGER PRIMARY KEY AUTOINCREMENT', _PK)
 
 def init_db():
     conn = get_db()
     c = conn.cursor()
     # 用户表
-    c.execute('''
+    c.execute(_ddl('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
@@ -44,14 +111,14 @@ def init_db():
             is_admin INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL
         )
-    ''')
+    '''))
     # 兼容旧库升级：如果 is_admin 列不存在则添加
     try:
         c.execute('SELECT is_admin FROM users LIMIT 1')
-    except sqlite3.OperationalError:
+    except _OP_ERR:
         c.execute('ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0')
     # 订单表：status='pending' 未导出，'exported' 已导出
-    c.execute('''
+    c.execute(_ddl('''
         CREATE TABLE IF NOT EXISTS orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -62,9 +129,9 @@ def init_db():
             exported_at TEXT,
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
-    ''')
+    '''))
     # 地址簿分组表
-    c.execute('''
+    c.execute(_ddl('''
         CREATE TABLE IF NOT EXISTS address_groups (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -73,9 +140,9 @@ def init_db():
             created_at TEXT NOT NULL,
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
-    ''')
+    '''))
     # 地址簿明细表
-    c.execute('''
+    c.execute(_ddl('''
         CREATE TABLE IF NOT EXISTS address_book (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -89,9 +156,9 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users(id),
             FOREIGN KEY (group_id) REFERENCES address_groups(id) ON DELETE CASCADE
         )
-    ''')
+    '''))
     # 导出存档表：每次导出时记录，保留72小时供重新下载
-    c.execute('''
+    c.execute(_ddl('''
         CREATE TABLE IF NOT EXISTS export_archives (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -102,7 +169,7 @@ def init_db():
             expires_at TEXT NOT NULL,
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
-    ''')
+    '''))
     # 创建默认管理员账号 lmy123 / lmy123（超级管理员）
     c.execute('SELECT id, is_admin FROM users WHERE username = ?', ('lmy123',))
     existing = c.fetchone()

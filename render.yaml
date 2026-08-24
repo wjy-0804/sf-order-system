@@ -12,3 +12,9 @@ services:
         value: "false"
       - key: PYTHON_VERSION
         value: "3.11.9"
+      - key: SECRET_KEY
+        generateValue: true
+      # DATABASE_URL：填入 Supabase 连接串（在 Render 控制台手动填，勿提交到仓库）
+      # 格式：postgresql://postgres:你的密码@db.你的项目.supabase.co:5432/postgres
+      - key: DATABASE_URL
+        sync: false
