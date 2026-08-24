@@ -213,10 +213,14 @@ SF_TEMPLATE_PATH = os.environ.get(
     'SF_TEMPLATE_PATH',
     os.path.join(os.path.dirname(os.path.abspath(__file__)), '顺丰模版.xlsx')
 )
-STATS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stats')
+# Serverless 环境（Vercel）项目目录只读，可写目录改用 /tmp
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_WRITABLE_DIR = tempfile.gettempdir() if os.environ.get('VERCEL') else _BASE_DIR
+
+STATS_DIR = os.path.join(_WRITABLE_DIR, 'stats')
 os.makedirs(STATS_DIR, exist_ok=True)
 
-ARCHIVES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'archives')
+ARCHIVES_DIR = os.path.join(_WRITABLE_DIR, 'archives')
 os.makedirs(ARCHIVES_DIR, exist_ok=True)
 
 # 顺丰模版列头（按顺序）
